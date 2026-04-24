@@ -1,4 +1,5 @@
 import logging
+import os
 import re
 import uuid
 import time
@@ -169,9 +170,12 @@ app = FastAPI(
 )
 
 origins = [
-    "http://localhost",
-    "http://127.0.0.1:8000",
-    "https://api.honcho.dev",
+    origin.strip()
+    for origin in os.getenv(
+        "CORS_ORIGINS",
+        "http://localhost,http://127.0.0.1:8000,https://api.honcho.dev",
+    ).split(",")
+    if origin.strip()
 ]
 
 app.add_middleware(
