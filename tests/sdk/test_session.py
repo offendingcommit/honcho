@@ -1,3 +1,4 @@
+from typing import Any
 from unittest.mock import AsyncMock, Mock
 
 import pytest
@@ -400,9 +401,13 @@ async def test_session_add_messages_chunks_batches_over_limit(
         user = await honcho_client.aio.peer(id="user-add-msg-chunk-async")
         assert isinstance(user, Peer)
 
-        calls: list[dict] = []
+        calls: list[dict[str, Any]] = []
 
-        async def fake_post(route: str, body: dict | None = None, query=None):
+        async def fake_post(
+            route: str,
+            body: dict[str, Any] | None = None,
+            query: Any = None,
+        ) -> list[dict[str, Any]]:
             assert body is not None
             calls.append({"route": route, "body": body, "query": query})
             return [
@@ -431,9 +436,13 @@ async def test_session_add_messages_chunks_batches_over_limit(
         user = honcho_client.peer(id="user-add-msg-chunk-sync")
         assert isinstance(user, Peer)
 
-        calls: list[dict] = []
+        calls: list[dict[str, Any]] = []
 
-        def fake_post(route: str, body: dict | None = None, query=None):
+        def fake_post(
+            route: str,
+            body: dict[str, Any] | None = None,
+            query: Any = None,
+        ) -> list[dict[str, Any]]:
             assert body is not None
             calls.append({"route": route, "body": body, "query": query})
             return [
