@@ -648,6 +648,17 @@ class LLMSettings(HonchoSettings):
     OPENAI_API_KEY: str | None = None
     GEMINI_API_KEY: str | None = None
 
+    # Route default OpenAI traffic through a proxy/gateway (e.g. Cloudflare AI
+    # Gateway). Applied to the module-level OpenAI client in src/llm/registry
+    # and to the embedding client when transport=openai.
+    OPENAI_BASE_URL: str | None = None
+
+    # When set, the value is sent as the cf-aig-authorization header on every
+    # OpenAI-compatible request (default and override clients, embeddings).
+    # This is how gateway-layer auth is enforced in front of the upstream
+    # provider key in the Authorization header.
+    CF_GATEWAY_AUTH_TOKEN: str | None = None
+
     # General LLM settings
     DEFAULT_MAX_TOKENS: Annotated[int, Field(default=1000, gt=0, le=100_000)] = 2500
 
@@ -731,7 +742,7 @@ class DeriverSettings(HonchoSettings):
 
     LOG_OBSERVATIONS: bool = False
 
-    MAX_INPUT_TOKENS: Annotated[int, Field(default=23000, gt=0, le=23000)] = 23000
+    MAX_INPUT_TOKENS: Annotated[int, Field(default=23000, gt=0, le=200_000)] = 23000
 
     # Maximum number of observations to return in working representation
     # This is applied to both explicit and deductive observations

@@ -1,5 +1,7 @@
 import logging
+import os
 import re
+import time
 import uuid
 from collections.abc import Awaitable, Callable
 from contextlib import asynccontextmanager
@@ -168,9 +170,12 @@ app = FastAPI(
 )
 
 origins = [
-    "http://localhost",
-    "http://127.0.0.1:8000",
-    "https://api.honcho.dev",
+    origin.strip()
+    for origin in os.getenv(
+        "CORS_ORIGINS",
+        "http://localhost,http://127.0.0.1:8000,https://api.honcho.dev",
+    ).split(",")
+    if origin.strip()
 ]
 
 app.add_middleware(
@@ -238,6 +243,7 @@ async def track_request(
     # Store in request state and context var
     request.state.request_id = request_id
     token = request_context.set(f"api:{request_id}")
+    started_at = time.perf_counter()
 
     try:
         response = await call_next(request)
@@ -245,10 +251,17 @@ async def track_request(
         # Track metrics if enabled
         if settings.METRICS.ENABLED:
             template = get_route_template(request)
+            duration_seconds = time.perf_counter() - started_at
             prometheus_metrics.record_api_request(
                 method=request.method,
                 endpoint=template,
                 status_code=str(response.status_code),
+            )
+            prometheus_metrics.record_api_request_duration(
+                method=request.method,
+                endpoint=template,
+                status_code=str(response.status_code),
+                duration_seconds=duration_seconds,
             )
 
         return response

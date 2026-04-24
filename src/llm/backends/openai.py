@@ -347,11 +347,28 @@ class OpenAIBackend:
                             tool_call.id,
                             exc.__class__.__name__,
                         )
+                # Gemini thinking models (reached via CF AI Gateway's
+                # OpenAI-compat route) return a thought_signature on tool
+                # calls. The upstream API rejects any follow-up request whose
+                # history drops the signature, so capture it here and thread
+                # it back into the assistant message in the history adapter.
+                thought_signature: str | None = getattr(
+                    tool_call, "thought_signature", None
+                )
+                if thought_signature is None:
+                    model_extra = getattr(tool_call, "model_extra", None)
+                    if isinstance(model_extra, dict):
+                        sig = cast(dict[str, Any], model_extra).get(
+                            "thought_signature"
+                        )
+                        if isinstance(sig, str):
+                            thought_signature = sig
                 tool_calls.append(
                     ToolCallResult(
                         id=tool_call.id,
                         name=tool_call.function.name,
                         input=tool_input,
+                        thought_signature=thought_signature,
                     )
                 )
 

@@ -4,73 +4,86 @@
 #   cp docker-compose.yml.example docker-compose.yml
 #   cp .env.template .env  # edit with your provider config
 #   docker compose up -d --build
-#
-# By default, ports are bound to 127.0.0.1 (localhost only).
-# For development, uncomment the source mounts and monitoring services below.
 
 services:
+  traefik:
+    image: traefik:v3.2
+    command:
+      - --api.dashboard=true
+      - --api.insecure=true
+      - --providers.file.filename=/etc/traefik/dynamic.yml
+      - --providers.file.watch=true
+      - --entrypoints.web.address=:8000
+      - --ping=true
+    ports:
+      - ${HONCHO_HTTP_PORT:-8000}:8000
+      - ${TRAEFIK_DASHBOARD_PORT:-8080}:8080
+    volumes:
+      - ./docker/traefik/dynamic.yml:/etc/traefik/dynamic.yml:ro
+    networks:
+      - honcho
+
   api:
+    image: honcho:latest
     build:
       context: .
       dockerfile: Dockerfile
-    entrypoint: ["sh", "docker/entrypoint.sh"]
+    entrypoint: ["/app/docker/entrypoint.sh"]
     depends_on:
       database:
         condition: service_healthy
       redis:
         condition: service_healthy
-    ports:
-      - "127.0.0.1:8000:8000"
-    # -- Development: mount source for live reload --
-    # volumes:
-    #   - .:/app
-    #   - venv:/app/.venv
+      traefik:
+        condition: service_started
+    expose:
+      - 8000
     environment:
       - DB_CONNECTION_URI=postgresql+psycopg://postgres:postgres@database:5432/postgres
       - CACHE_URL=redis://redis:6379/0?suppress=true
-      - CACHE_ENABLED=true
     env_file:
       - path: .env
         required: false
-    restart: unless-stopped
+    networks:
+      - honcho
 
   deriver:
     build:
       context: .
       dockerfile: Dockerfile
-    entrypoint: ["/app/.venv/bin/python", "-m", "src.deriver"]
+    entrypoint: ["python", "-m", "src.deriver"]
     depends_on:
       database:
         condition: service_healthy
       redis:
         condition: service_healthy
-    # -- Development: mount source for live reload --
-    # volumes:
-    #   - .:/app
-    #   - venv:/app/.venv
     environment:
       - DB_CONNECTION_URI=postgresql+psycopg://postgres:postgres@database:5432/postgres
       - CACHE_URL=redis://redis:6379/0?suppress=true
-      - CACHE_ENABLED=true
+      - METRICS_ENABLED=true
     env_file:
       - path: .env
         required: false
-    restart: unless-stopped
+    networks:
+      - honcho
 
   database:
     image: pgvector/pgvector:pg15
-    restart: unless-stopped
+    restart: always
     ports:
-      - "127.0.0.1:5432:5432"
-    command: ["postgres", "-c", "max_connections=200"]
+      - 5432:5432
+    command: ["postgres", "-c", "max_connections=800"]
     environment:
       - POSTGRES_DB=postgres
       - POSTGRES_USER=postgres
       - POSTGRES_PASSWORD=postgres
+      - POSTGRES_HOST_AUTH_METHOD=trust
       - PGDATA=/var/lib/postgresql/data/pgdata
     volumes:
       - ./database/init.sql:/docker-entrypoint-initdb.d/init.sql
       - pgdata:/var/lib/postgresql/data/
+    networks:
+      - honcho
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U postgres -d postgres"]
       interval: 5s
@@ -79,46 +92,54 @@ services:
 
   redis:
     image: redis:8.2
-    restart: unless-stopped
+    restart: always
     ports:
-      - "127.0.0.1:6379:6379"
+      - 6379:6379
     volumes:
-      - redis-data:/data
+      - ./redis-data:/data
+    networks:
+      - honcho
     healthcheck:
       test: ["CMD-SHELL", "redis-cli ping"]
       interval: 5s
       timeout: 5s
       retries: 5
 
-  # -- Development: monitoring stack (uncomment to enable) --
-  # prometheus:
-  #   image: prom/prometheus:v3.2.1
-  #   ports:
-  #     - "127.0.0.1:9090:9090"
-  #   volumes:
-  #     - ./docker/prometheus.yml:/etc/prometheus/prometheus.yml:ro
-  #     - prometheus-data:/prometheus
-  #   depends_on:
-  #     api:
-  #       condition: service_started
-  # grafana:
-  #   image: grafana/grafana:11.4.0
-  #   ports:
-  #     - "127.0.0.1:3000:3000"
-  #   environment:
-  #     - GF_SECURITY_ADMIN_USER=admin
-  #     - GF_SECURITY_ADMIN_PASSWORD=admin
-  #     - GF_AUTH_ANONYMOUS_ENABLED=true
-  #     - GF_AUTH_ANONYMOUS_ORG_ROLE=Viewer
-  #   volumes:
-  #     - ./docker/grafana-datasource.yml:/etc/grafana/provisioning/datasources/datasource.yml:ro
-  #   depends_on:
-  #     prometheus:
-  #       condition: service_started
+  prometheus:
+    image: prom/prometheus:v3.2.1
+    ports:
+      - 9090:9090
+    volumes:
+      - ./docker/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    depends_on:
+      api:
+        condition: service_started
+    networks:
+      - honcho
+
+  grafana:
+    image: grafana/grafana:11.4.0
+    ports:
+      - 3000:3000
+    environment:
+      - GF_SECURITY_ADMIN_USER=admin
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+      - GF_AUTH_ANONYMOUS_ENABLED=true
+      - GF_AUTH_ANONYMOUS_ORG_ROLE=Viewer
+    volumes:
+      - ./grafana-data:/var/lib/grafana
+      - ./docker/grafana-datasource.yml:/etc/grafana/provisioning/datasources/datasource.yml:ro
+    depends_on:
+      prometheus:
+        condition: service_started
+    networks:
+      - honcho
+
+networks:
+  honcho:
+    name: honcho
 
 volumes:
   pgdata:
-  redis-data:
-  # -- Development: uncomment if using source mounts --
-  # venv:
-  # prometheus-data:
+  prometheus-data:
