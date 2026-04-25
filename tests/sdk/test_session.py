@@ -1,3 +1,6 @@
+from typing import Any
+from unittest.mock import AsyncMock, Mock
+
 import pytest
 
 from sdks.python.src.honcho.api_types import QueueStatusResponse
@@ -383,6 +386,80 @@ async def test_session_add_messages_return_value(
         assert result[0].peer_id == user.id
         assert result[1].content == "I'm doing well, thank you!"
         assert result[1].peer_id == assistant.id
+
+
+@pytest.mark.asyncio
+async def test_session_add_messages_chunks_batches_over_limit(
+    client_fixture: tuple[Honcho, str],
+):
+    honcho_client, client_type = client_fixture
+    total_messages = 217
+    calls: list[dict[str, Any]] = []
+
+    def _fake_response(
+        route: str,
+        body: dict[str, Any] | None,
+        query: Any,
+        session_id: str,
+        peer_id: str,
+    ) -> list[dict[str, Any]]:
+        assert body is not None
+        calls.append({"route": route, "body": body, "query": query})
+        return [
+            {
+                "id": f"msg-{len(calls)}-{idx}",
+                "workspace_id": honcho_client.workspace_id,
+                "session_id": session_id,
+                "peer_id": peer_id,
+                "content": item["content"],
+                "metadata": item.get("metadata") or {},
+                "configuration": item.get("configuration") or {},
+                "created_at": "2026-04-02T00:00:00Z",
+                "token_count": 1,
+            }
+            for idx, item in enumerate(body["messages"])
+        ]
+
+    if client_type == "async":
+        session = await honcho_client.aio.session(id="test-session-add-msg-chunk-async")
+        assert isinstance(session, Session)
+        user = await honcho_client.aio.peer(id="user-add-msg-chunk-async")
+        assert isinstance(user, Peer)
+
+        async def fake_post_async(
+            route: str,
+            body: dict[str, Any] | None = None,
+            query: Any = None,
+        ) -> list[dict[str, Any]]:
+            return _fake_response(route, body, query, session.id, user.id)
+
+        honcho_client._async_http_client.post = AsyncMock(side_effect=fake_post_async)  # pyright: ignore[reportPrivateUsage]
+
+        result = await session.aio.add_messages(
+            [user.message(f"message {i}") for i in range(total_messages)]
+        )
+    else:
+        session = honcho_client.session(id="test-session-add-msg-chunk-sync")
+        assert isinstance(session, Session)
+        user = honcho_client.peer(id="user-add-msg-chunk-sync")
+        assert isinstance(user, Peer)
+
+        def fake_post_sync(
+            route: str,
+            body: dict[str, Any] | None = None,
+            query: Any = None,
+        ) -> list[dict[str, Any]]:
+            return _fake_response(route, body, query, session.id, user.id)
+
+        honcho_client._http.post = Mock(side_effect=fake_post_sync)  # pyright: ignore[reportPrivateUsage]
+
+        result = session.add_messages(
+            [user.message(f"message {i}") for i in range(total_messages)]
+        )
+
+    assert len(calls) == 3
+    assert [len(call["body"]["messages"]) for call in calls] == [100, 100, 17]
+    assert len(result) == total_messages
 
 
 @pytest.mark.asyncio

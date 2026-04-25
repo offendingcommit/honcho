@@ -9,7 +9,7 @@ history adapter selection) lives here now.
 from __future__ import annotations
 
 from functools import lru_cache
-from typing import assert_never
+from typing import Any, assert_never
 
 from anthropic import AsyncAnthropic
 from google import genai
@@ -33,6 +33,20 @@ from .history_adapters import (
 from .types import ProviderClient
 
 
+def _cf_gateway_default_headers() -> dict[str, str] | None:
+    """Build the cf-aig-authorization header dict, or None if disabled.
+
+    Gateway-layer auth (cfut_ token) rides alongside the upstream provider
+    key in Authorization. When set, every OpenAI-compatible client in this
+    module sends it so CF AI Gateway can authenticate requests before
+    forwarding them to the upstream provider.
+    """
+    token = settings.LLM.CF_GATEWAY_AUTH_TOKEN
+    if not token:
+        return None
+    return {"cf-aig-authorization": f"Bearer {token}"}
+
+
 @lru_cache(maxsize=1)
 def get_anthropic_client() -> AsyncAnthropic:
     """Default Anthropic client built from settings.LLM.ANTHROPIC_API_KEY."""
@@ -44,10 +58,19 @@ def get_anthropic_client() -> AsyncAnthropic:
 
 @lru_cache(maxsize=1)
 def get_openai_client() -> AsyncOpenAI:
-    """Default OpenAI client built from settings.LLM.OPENAI_API_KEY."""
-    return AsyncOpenAI(
-        api_key=settings.LLM.OPENAI_API_KEY,
-    )
+    """Default OpenAI client built from settings.LLM.OPENAI_API_KEY.
+
+    Honors ``LLM_OPENAI_BASE_URL`` to route default OpenAI traffic through a
+    proxy/gateway, and ``LLM_CF_GATEWAY_AUTH_TOKEN`` to inject the
+    cf-aig-authorization header on every request.
+    """
+    kwargs: dict[str, Any] = {"api_key": settings.LLM.OPENAI_API_KEY}
+    if settings.LLM.OPENAI_BASE_URL:
+        kwargs["base_url"] = settings.LLM.OPENAI_BASE_URL
+    headers = _cf_gateway_default_headers()
+    if headers is not None:
+        kwargs["default_headers"] = headers
+    return AsyncOpenAI(**kwargs)
 
 
 @lru_cache(maxsize=1)
@@ -63,7 +86,11 @@ def get_openai_override_client(
     base_url: str | None, api_key: str | None
 ) -> AsyncOpenAI:
     """OpenAI client for a specific (base_url, api_key) pair. Cached by key."""
-    return AsyncOpenAI(api_key=api_key, base_url=base_url)
+    kwargs: dict[str, Any] = {"api_key": api_key, "base_url": base_url}
+    headers = _cf_gateway_default_headers()
+    if headers is not None:
+        kwargs["default_headers"] = headers
+    return AsyncOpenAI(**kwargs)
 
 
 @lru_cache(maxsize=128)
@@ -95,9 +122,13 @@ if settings.LLM.ANTHROPIC_API_KEY:
     )
 
 if settings.LLM.OPENAI_API_KEY:
-    CLIENTS["openai"] = AsyncOpenAI(
-        api_key=settings.LLM.OPENAI_API_KEY,
-    )
+    _openai_default_kwargs: dict[str, Any] = {"api_key": settings.LLM.OPENAI_API_KEY}
+    if settings.LLM.OPENAI_BASE_URL:
+        _openai_default_kwargs["base_url"] = settings.LLM.OPENAI_BASE_URL
+    _cf_headers = _cf_gateway_default_headers()
+    if _cf_headers is not None:
+        _openai_default_kwargs["default_headers"] = _cf_headers
+    CLIENTS["openai"] = AsyncOpenAI(**_openai_default_kwargs)
 
 if settings.LLM.GEMINI_API_KEY:
     CLIENTS["gemini"] = genai.client.Client(

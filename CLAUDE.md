@@ -84,6 +84,44 @@ All API routes follow the pattern: `/v1/{resource}/{id}/{action}`
 - Typechecking: `uv run basedpyright`
 - Format code: `uv run ruff format src/`
 
+### LLM provider gotchas (learned 2026-04-16 in k8s deploy)
+
+- **Structured outputs (`response_format={"type": "json_schema"}`) only work on providers whose upstream API natively honors them.** Google Gemini does (route via `cf` provider with base_url ending in `/openai`). Ollama Cloud (reached via the `custom` provider + `custom-ollama` CF gateway endpoint, or any direct Ollama endpoint) does **not** translate `response_format` into Ollama's native JSON-mode — every Ollama Cloud model (GLM-5.1, nemotron-3-nano, qwen3.5, devstral-small-2 confirmed) returns free-form text/markdown when a schema is requested, and `honcho_llm_call` bubbles a `ValidationError: Invalid JSON` out of pydantic parsing.
+- **Therefore: deriver (`src/deriver/deriver.py:126`) and summary (`src/utils/summarizer.py`) must stay on a Gemini-backed `cf` provider.** Dream, dialectic, and any free-form / tool-call path is free to use the `custom` provider.
+- **Gemini `thoughtSignature` round-tripping breaks on the CF `openai`-compat route.** Any call with `maxToolIterations > 1` AND `thinkingBudgetTokens > 0` will return `400 Function call is missing a thought_signature` on iteration 2+. If you need thinking on a multi-iteration tool loop, use the native Gemini provider, not the OpenAI-compat route — or set `thinkingBudgetTokens=0`.
+- **None of this is Cloudflare's fault.** CF AI Gateway is a transparent proxy in both the `openai` and `custom-ollama` routes. The limitations live at the upstream provider (Ollama Cloud's OpenAI-compat layer).
+
+### Local LM Studio Setup
+
+- Honcho can use LM Studio for generation through the `custom` provider path.
+- Keep `LLM_OPENAI_API_KEY` configured for embeddings unless embedding support is added for local models.
+- For Docker Compose, `LLM_OPENAI_COMPATIBLE_BASE_URL` must be `http://host.docker.internal:1234/v1`, not `http://localhost:1234/v1`.
+- `LLM_OPENAI_COMPATIBLE_API_KEY=lm-studio` is sufficient for local use.
+- Current local default model is `qwen2.5-14b-instruct`.
+- When overriding `DIALECTIC_LEVELS__*` via env vars, each level needs its full required settings, not just `PROVIDER` and `MODEL`. Include `THINKING_BUDGET_TOKENS` and `MAX_TOOL_ITERATIONS`, and optionally `MAX_OUTPUT_TOKENS`.
+- Docker should own the runtime environment completely. Do not mount the repo onto `/app` and do not mount a named volume onto `/app/.venv`, or the image-built environment can be hidden and replaced with incompatible artifacts.
+- If Docker services fail with missing Python modules or incompatible native extensions, rebuild the image instead of trying to repair the environment in-place:
+
+```bash
+docker compose build --no-cache api deriver
+docker compose up -d --force-recreate api deriver
+```
+
+- Verify LM Studio from the host with:
+
+```bash
+curl -sS http://localhost:1234/v1/models
+```
+
+- Verify LM Studio from Docker with:
+
+```bash
+docker compose run --rm --entrypoint sh api -lc 'python - <<\"PY\"
+import urllib.request
+print(urllib.request.urlopen(\"http://host.docker.internal:1234/v1/models\", timeout=5).status)
+PY'
+```
+
 ### SDK Testing
 
 #### TypeScript SDK

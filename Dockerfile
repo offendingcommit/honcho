@@ -46,6 +46,8 @@ COPY --chown=app:app alembic.ini /app/alembic.ini
 # Copy config files - this will copy config.toml if it exists, and config.toml.example
 COPY --chown=app:app config.toml* /app/
 
+RUN chmod +x /app/docker/entrypoint.sh
+
 # Switch to non-root user
 USER app
 

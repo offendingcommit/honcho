@@ -104,20 +104,27 @@ class OpenAIHistoryAdapter:
         self,
         result: CompletionResult,
     ) -> dict[str, Any]:
+        tool_calls: list[dict[str, Any]] = []
+        for tool_call in result.tool_calls:
+            entry: dict[str, Any] = {
+                "id": tool_call.id,
+                "type": "function",
+                "function": {
+                    "name": tool_call.name,
+                    "arguments": json.dumps(tool_call.input),
+                },
+            }
+            # Gemini thinking models via CF AI Gateway's OpenAI-compat route
+            # require each replayed function call to carry its original
+            # thought_signature, or the next request 400s with
+            # "Function call is missing a thought_signature".
+            if tool_call.thought_signature is not None:
+                entry["thought_signature"] = tool_call.thought_signature
+            tool_calls.append(entry)
         message: dict[str, Any] = {
             "role": "assistant",
             "content": result.content if isinstance(result.content, str) else None,
-            "tool_calls": [
-                {
-                    "id": tool_call.id,
-                    "type": "function",
-                    "function": {
-                        "name": tool_call.name,
-                        "arguments": json.dumps(tool_call.input),
-                    },
-                }
-                for tool_call in result.tool_calls
-            ],
+            "tool_calls": tool_calls,
         }
         if result.reasoning_details:
             message["reasoning_details"] = result.reasoning_details

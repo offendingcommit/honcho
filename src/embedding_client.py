@@ -2,7 +2,7 @@ import asyncio
 import logging
 import threading
 from collections import defaultdict
-from typing import NamedTuple
+from typing import Any, NamedTuple
 
 import tiktoken
 from google import genai
@@ -58,10 +58,17 @@ class _EmbeddingClient:
         else:  # openai
             if not config.api_key:
                 raise ValueError("OpenAI API key is required")
-            self.client = AsyncOpenAI(
-                api_key=config.api_key,
-                base_url=config.base_url,
-            )
+            openai_kwargs: dict[str, Any] = {
+                "api_key": config.api_key,
+                "base_url": config.base_url,
+            }
+            # Inject CF AI Gateway auth header globally when configured so
+            # embeddings reach the upstream provider via the gateway.
+            if settings.LLM.CF_GATEWAY_AUTH_TOKEN:
+                openai_kwargs["default_headers"] = {
+                    "cf-aig-authorization": f"Bearer {settings.LLM.CF_GATEWAY_AUTH_TOKEN}"
+                }
+            self.client = AsyncOpenAI(**openai_kwargs)
             self.max_embedding_tokens = max_input_tokens
             self.max_batch_size = 2048  # OpenAI batch limit
 
