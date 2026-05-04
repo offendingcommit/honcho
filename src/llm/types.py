@@ -66,6 +66,9 @@ class HonchoLLMCallResponse(BaseModel, Generic[T]):
     tool_calls_made: list[dict[str, Any]] = Field(default_factory=list)
     iterations: int = 0
     """Number of LLM calls made in the tool execution loop."""
+    hit_max_iterations: bool = False
+    """True when the tool loop exited via the max-iterations synthesis path
+    rather than the model deciding to stop. Telemetry-only signal."""
     thinking_content: str | None = None
     # Full thinking blocks with signatures for multi-turn replay (Anthropic only).
     thinking_blocks: list[dict[str, Any]] = Field(default_factory=list)

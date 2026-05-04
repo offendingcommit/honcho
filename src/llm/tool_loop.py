@@ -470,6 +470,7 @@ async def execute_tool_loop(
     final_response = await final_call_func()
     final_response.tool_calls_made = all_tool_calls
     final_response.iterations = iteration + 1
+    final_response.hit_max_iterations = True
     final_response.input_tokens = total_input_tokens + final_response.input_tokens
     final_response.output_tokens = total_output_tokens + final_response.output_tokens
     final_response.cache_creation_input_tokens = (
