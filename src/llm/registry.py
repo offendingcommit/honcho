@@ -63,6 +63,11 @@ def get_openai_override_client(
     base_url: str | None, api_key: str | None
 ) -> AsyncOpenAI:
     """OpenAI client for a specific (base_url, api_key) pair. Cached by key."""
+    headers = _cf_gateway_headers(base_url)
+    if headers:
+        return AsyncOpenAI(
+            api_key=api_key, base_url=base_url, default_headers=headers
+        )
     return AsyncOpenAI(api_key=api_key, base_url=base_url)
 
 
@@ -72,6 +77,14 @@ def get_anthropic_override_client(
     api_key: str | None,
 ) -> AsyncAnthropic:
     """Anthropic client for a specific (base_url, api_key) pair. Cached by key."""
+    headers = _cf_gateway_headers(base_url)
+    if headers:
+        return AsyncAnthropic(
+            api_key=api_key,
+            base_url=base_url,
+            timeout=600.0,
+            default_headers=headers,
+        )
     return AsyncAnthropic(api_key=api_key, base_url=base_url, timeout=600.0)
 
 
@@ -80,8 +93,26 @@ def get_gemini_override_client(
     base_url: str | None, api_key: str | None
 ) -> genai.Client:
     """Gemini client for a specific (base_url, api_key) pair. Cached by key."""
-    http_options = genai_types.HttpOptions(base_url=base_url) if base_url else None
+    headers = _cf_gateway_headers(base_url)
+    if base_url or headers:
+        http_options = genai_types.HttpOptions(base_url=base_url, headers=headers)
+    else:
+        http_options = None
     return genai.Client(api_key=api_key, http_options=http_options)
+
+
+def _cf_gateway_headers(base_url: str | None) -> dict[str, str] | None:
+    """Cloudflare AI Gateway requires a per-account auth token in the
+    cf-aig-authorization header when account-scoped auth is enabled. Inject it
+    on any override client routed through a CF gateway URL when
+    LLM.CF_GATEWAY_AUTH_TOKEN is configured.
+    """
+    if not base_url or "gateway.ai.cloudflare.com" not in base_url:
+        return None
+    token = settings.LLM.CF_GATEWAY_AUTH_TOKEN
+    if not token:
+        return None
+    return {"cf-aig-authorization": f"Bearer {token}"}
 
 
 # Module-level default-client registry, populated at import time. Tests patch

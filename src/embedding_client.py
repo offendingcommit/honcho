@@ -2,7 +2,7 @@ import asyncio
 import logging
 import threading
 from collections import defaultdict
-from typing import Any, NamedTuple
+from typing import NamedTuple
 
 import tiktoken
 from google import genai
@@ -20,6 +20,19 @@ class BatchItem(NamedTuple):
     text: str
     text_id: str
     chunk_index: int
+
+
+def _cf_gateway_headers(base_url: str | None) -> dict[str, str] | None:
+    """Cloudflare AI Gateway requires a per-account auth token in the
+    cf-aig-authorization header. Mirrors src/llm/registry._cf_gateway_headers
+    so the embedding client doesn't depend on the LLM runtime registry.
+    """
+    if not base_url or "gateway.ai.cloudflare.com" not in base_url:
+        return None
+    token = settings.LLM.CF_GATEWAY_AUTH_TOKEN
+    if not token:
+        return None
+    return {"cf-aig-authorization": f"Bearer {token}"}
 
 
 class _EmbeddingClient:
@@ -42,11 +55,13 @@ class _EmbeddingClient:
         if self.transport == "gemini":
             if not config.api_key:
                 raise ValueError("Gemini API key is required")
-            http_options = (
-                genai_types.HttpOptions(base_url=config.base_url)
-                if config.base_url
-                else None
-            )
+            cf_headers = _cf_gateway_headers(config.base_url)
+            if config.base_url or cf_headers:
+                http_options = genai_types.HttpOptions(
+                    base_url=config.base_url, headers=cf_headers
+                )
+            else:
+                http_options = None
             self.client: genai.Client | AsyncOpenAI = genai.Client(
                 api_key=config.api_key,
                 http_options=http_options,
@@ -58,10 +73,18 @@ class _EmbeddingClient:
         else:  # openai
             if not config.api_key:
                 raise ValueError("OpenAI API key is required")
-            self.client = AsyncOpenAI(
-                api_key=config.api_key,
-                base_url=config.base_url,
-            )
+            cf_headers = _cf_gateway_headers(config.base_url)
+            if cf_headers:
+                self.client = AsyncOpenAI(
+                    api_key=config.api_key,
+                    base_url=config.base_url,
+                    default_headers=cf_headers,
+                )
+            else:
+                self.client = AsyncOpenAI(
+                    api_key=config.api_key,
+                    base_url=config.base_url,
+                )
             self.max_embedding_tokens = max_input_tokens
             self.max_batch_size = 2048  # OpenAI batch limit
 

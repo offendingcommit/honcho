@@ -87,14 +87,6 @@ class BaseSpecialist(ABC):
         """Get the configured model to use for this specialist."""
         ...
 
-    def get_provider(self) -> str | None:
-        """Get the provider override for this specialist, or None to inherit from DREAM."""
-        return None
-
-    def get_thinking_budget(self) -> int | None:
-        """Get the thinking budget override, or None to inherit from DREAM."""
-        return None
-
     def get_max_tokens(self) -> int:
         """Get max output tokens for this specialist."""
         return 16384
@@ -249,7 +241,6 @@ If you update it, send the full deduplicated list and remove stale entries.
             messages=messages,
             track_name=f"Dreamer/{self.name}",
             iteration_callback=iteration_callback,
-            thinking_budget_tokens=llm_settings.THINKING_BUDGET_TOKENS,
         )
 
         # Log metrics
@@ -341,12 +332,6 @@ class DeductionSpecialist(BaseSpecialist):
             settings.DREAM.DEDUCTION_MODEL_CONFIG,
             specialist_name="DREAM DEDUCTION",
         )
-
-    def get_provider(self) -> str | None:
-        return settings.DREAM.DEDUCTION_PROVIDER
-
-    def get_thinking_budget(self) -> int | None:
-        return settings.DREAM.DEDUCTION_THINKING_BUDGET_TOKENS
 
     def get_max_tokens(self) -> int:
         return 8192
@@ -495,12 +480,6 @@ class InductionSpecialist(BaseSpecialist):
             settings.DREAM.INDUCTION_MODEL_CONFIG,
             specialist_name="DREAM INDUCTION",
         )
-
-    def get_provider(self) -> str | None:
-        return settings.DREAM.INDUCTION_PROVIDER
-
-    def get_thinking_budget(self) -> int | None:
-        return settings.DREAM.INDUCTION_THINKING_BUDGET_TOKENS
 
     def get_max_tokens(self) -> int:
         return 8192

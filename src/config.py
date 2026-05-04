@@ -648,6 +648,10 @@ class LLMSettings(HonchoSettings):
     OPENAI_API_KEY: str | None = None
     GEMINI_API_KEY: str | None = None
 
+    # Cloudflare AI Gateway: when set, injected as cf-aig-authorization header
+    # on any provider override client whose base_url targets a CF gateway.
+    CF_GATEWAY_AUTH_TOKEN: str | None = None
+
     # General LLM settings
     DEFAULT_MAX_TOKENS: Annotated[int, Field(default=1000, gt=0, le=100_000)] = 2500
 
