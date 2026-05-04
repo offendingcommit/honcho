@@ -21,6 +21,11 @@ from tenacity import retry, stop_after_attempt, wait_exponential
 
 from src.config import ConfiguredModelSettings, ModelConfig
 from src.exceptions import ValidationException
+from src.telemetry.llm_call_metrics import (
+    finalize_success,
+    mark_max_iterations,
+    observe_llm_call,
+)
 from src.telemetry.logging import conditional_observe
 from src.telemetry.reasoning_traces import log_reasoning_trace
 
@@ -193,6 +198,11 @@ async def honcho_llm_call(
     # tenacity uses 1-indexed attempts.
     current_attempt.set(1)
 
+    # Captures the AttemptPlan that produced the most recent (and on success,
+    # the winning) call so observability can label by the model that actually
+    # answered — primary on early attempts, backup on the final retry.
+    last_plan: dict[str, AttemptPlan | None] = {"value": None}
+
     def _get_attempt_plan() -> AttemptPlan:
         plan = plan_attempt(
             runtime_model_config=runtime_model_config,
@@ -201,6 +211,7 @@ async def honcho_llm_call(
             call_thinking_budget_tokens=thinking_budget_tokens,
             call_reasoning_effort=reasoning_effort,
         )
+        last_plan["value"] = plan
         update_current_langfuse_observation(
             plan.provider,
             plan.model,
@@ -304,11 +315,92 @@ async def honcho_llm_call(
             stop_seqs if stop_seqs is not None else runtime_model_config.stop_sequences
         )
 
-    # Tool-less path: call once and return.
-    if not tools or not tool_executor:
-        result: (
-            HonchoLLMCallResponse[Any] | AsyncIterator[HonchoLLMCallStreamChunk]
-        ) = await decorated()
+    with observe_llm_call(
+        track_name=track_name,
+        trace_name=trace_name,
+        runtime_model_config=runtime_model_config,
+    ) as obs_state:
+        # Tool-less path: call once and return.
+        if not tools or not tool_executor:
+            result: (
+                HonchoLLMCallResponse[Any] | AsyncIterator[HonchoLLMCallStreamChunk]
+            ) = await decorated()
+            response_for_metrics = (
+                result if isinstance(result, HonchoLLMCallResponse) else None
+            )
+            winning = last_plan["value"]
+            finalize_success(
+                obs_state,
+                response=response_for_metrics,
+                final_provider=str(winning.provider) if winning else None,
+                final_model=winning.model if winning else None,
+                attempts=current_attempt.get(),
+                iterations=None,
+                has_backup=runtime_model_config.fallback is not None,
+            )
+            if trace_name and isinstance(result, HonchoLLMCallResponse):
+                log_reasoning_trace(
+                    task_type=trace_name,
+                    model_config=runtime_model_config,
+                    prompt=prompt,
+                    response=result,
+                    max_tokens=max_tokens,
+                    thinking_budget_tokens=_trace_thinking_budget(),
+                    reasoning_effort=_trace_reasoning_effort(),
+                    json_mode=json_mode,
+                    stop_seqs=_trace_stop_seqs(),
+                    messages=messages,
+                )
+            return result
+
+        # execute_tool_loop raises ValidationException on out-of-range
+        # max_tool_iterations; fail-fast is cheaper than silent clamping here.
+        result = await execute_tool_loop(
+            prompt=prompt,
+            max_tokens=max_tokens,
+            messages=messages,
+            tools=tools,
+            tool_choice=tool_choice,
+            tool_executor=tool_executor,
+            max_tool_iterations=max_tool_iterations,
+            response_model=response_model,
+            json_mode=json_mode,
+            temperature=temperature,
+            stop_seqs=stop_seqs,
+            verbosity=verbosity,
+            enable_retry=enable_retry,
+            retry_attempts=retry_attempts,
+            max_input_tokens=max_input_tokens,
+            get_attempt_plan=_get_attempt_plan,
+            before_retry_callback=before_retry_callback,
+            stream_final=stream_final_only,
+            iteration_callback=iteration_callback,
+            track_name=track_name,
+            trace_name=trace_name,
+        )
+        response_for_metrics = (
+            result if isinstance(result, HonchoLLMCallResponse) else None
+        )
+        winning = last_plan["value"]
+        iterations = (
+            response_for_metrics.iterations
+            if response_for_metrics
+            else (getattr(result, "iterations", None))
+        )
+        finalize_success(
+            obs_state,
+            response=response_for_metrics,
+            final_provider=str(winning.provider) if winning else None,
+            final_model=winning.model if winning else None,
+            attempts=current_attempt.get(),
+            iterations=iterations,
+            has_backup=runtime_model_config.fallback is not None,
+        )
+        if response_for_metrics is not None and getattr(
+            response_for_metrics, "hit_max_iterations", False
+        ):
+            mark_max_iterations(obs_state, iterations or max_tool_iterations)
+
         if trace_name and isinstance(result, HonchoLLMCallResponse):
             log_reasoning_trace(
                 task_type=trace_name,
@@ -323,44 +415,6 @@ async def honcho_llm_call(
                 messages=messages,
             )
         return result
-
-    # execute_tool_loop raises ValidationException on out-of-range
-    # max_tool_iterations; fail-fast is cheaper than silent clamping here.
-    result = await execute_tool_loop(
-        prompt=prompt,
-        max_tokens=max_tokens,
-        messages=messages,
-        tools=tools,
-        tool_choice=tool_choice,
-        tool_executor=tool_executor,
-        max_tool_iterations=max_tool_iterations,
-        response_model=response_model,
-        json_mode=json_mode,
-        temperature=temperature,
-        stop_seqs=stop_seqs,
-        verbosity=verbosity,
-        enable_retry=enable_retry,
-        retry_attempts=retry_attempts,
-        max_input_tokens=max_input_tokens,
-        get_attempt_plan=_get_attempt_plan,
-        before_retry_callback=before_retry_callback,
-        stream_final=stream_final_only,
-        iteration_callback=iteration_callback,
-    )
-    if trace_name and isinstance(result, HonchoLLMCallResponse):
-        log_reasoning_trace(
-            task_type=trace_name,
-            model_config=runtime_model_config,
-            prompt=prompt,
-            response=result,
-            max_tokens=max_tokens,
-            thinking_budget_tokens=_trace_thinking_budget(),
-            reasoning_effort=_trace_reasoning_effort(),
-            json_mode=json_mode,
-            stop_seqs=_trace_stop_seqs(),
-            messages=messages,
-        )
-    return result
 
 
 __all__ = ["honcho_llm_call"]
