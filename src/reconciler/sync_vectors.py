@@ -11,14 +11,17 @@ import time
 from dataclasses import dataclass
 from typing import cast
 
-from sqlalchemy import and_, delete, select, update
+from sqlalchemy import and_, delete, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm.attributes import InstrumentedAttribute
+from sqlalchemy.sql import ColumnElement
 from sqlalchemy.sql.functions import func
 
 from src import models
 from src.config import settings
 from src.dependencies import tracked_db
 from src.embedding_client import embedding_client
+from src.exceptions import VectorStoreError
 from src.vector_store import VectorRecord, VectorStore, get_external_vector_store
 
 logger = logging.getLogger(__name__)
@@ -26,7 +29,20 @@ logger = logging.getLogger(__name__)
 # Constants
 RECONCILIATION_BATCH_SIZE = 50
 RECONCILIATION_TIME_BUDGET_SECONDS = 240  # Leave headroom for other maintenance work
-MAX_SYNC_ATTEMPTS = 5  # After this many failures, mark as failed
+MAX_SYNC_ATTEMPTS = 20  # After this many failures, mark as failed
+# Flat wait between sync attempts. With MAX_SYNC_ATTEMPTS=20 this gives ~3 hours
+# of outage headroom before a row is marked failed.
+SYNC_BACKOFF = datetime.timedelta(minutes=10)
+
+
+def _backoff_eligible(
+    last_sync_at: InstrumentedAttribute[datetime.datetime | None],
+) -> ColumnElement[bool]:
+    """Rows are eligible for sync if never attempted or past the backoff window."""
+    return or_(
+        last_sync_at.is_(None),
+        last_sync_at < func.now() - SYNC_BACKOFF,
+    )
 
 
 @dataclass
@@ -72,6 +88,7 @@ async def _get_documents_needing_sync(
             and_(
                 models.Document.deleted_at.is_(None),
                 models.Document.sync_state == "pending",  # Only pending items
+                _backoff_eligible(models.Document.last_sync_at),
             )
         )
         .order_by(models.Document.last_sync_at.asc().nullsfirst())
@@ -100,7 +117,12 @@ async def _get_message_embeddings_needing_sync(
     """
     stmt = (
         select(models.MessageEmbedding)
-        .where(models.MessageEmbedding.sync_state == "pending")
+        .where(
+            and_(
+                models.MessageEmbedding.sync_state == "pending",
+                _backoff_eligible(models.MessageEmbedding.last_sync_at),
+            )
+        )
         .order_by(models.MessageEmbedding.last_sync_at.asc().nullsfirst())
         .limit(batch_size)
         .with_for_update(skip_locked=True)
@@ -259,8 +281,16 @@ async def _sync_documents(
                 .values(sync_state="synced", last_sync_at=func.now(), sync_attempts=0)
             )
             synced_count += len(docs_to_sync)
+        except VectorStoreError:
+            logger.warning(
+                "Vector store unavailable while syncing namespace %s", namespace
+            )
+            await _bump_document_sync_attempts(db, docs_to_sync)
+            failed_count += len(docs_to_sync)
         except Exception:
-            logger.exception("Failed to sync documents to namespace %s", namespace)
+            logger.exception(
+                "Unexpected error syncing documents to namespace %s", namespace
+            )
             await _bump_document_sync_attempts(db, docs_to_sync)
             failed_count += len(docs_to_sync)
 
@@ -399,9 +429,17 @@ async def _sync_message_embeddings(
                 .values(sync_state="synced", last_sync_at=func.now(), sync_attempts=0)
             )
             synced_count += len(embs_to_sync)
+        except VectorStoreError:
+            logger.warning(
+                "Vector store unavailable while syncing message embeddings to namespace %s",
+                namespace,
+            )
+            await _bump_message_embedding_sync_attempts(db, embs_to_sync)
+            failed_count += len(embs_to_sync)
         except Exception:
             logger.exception(
-                "Failed to sync message embeddings to namespace %s", namespace
+                "Unexpected error syncing message embeddings to namespace %s",
+                namespace,
             )
             await _bump_message_embedding_sync_attempts(db, embs_to_sync)
             failed_count += len(embs_to_sync)
@@ -477,19 +515,7 @@ async def _reconcile_message_embeddings_batch(
         if not embs:
             return False
 
-        try:
-            synced, failed = await _sync_message_embeddings(
-                db, embs, external_vector_store
-            )
-        except Exception:
-            logger.exception(
-                "Message embedding reconciliation failed for %s embeddings",
-                len(embs),
-            )
-            await _bump_message_embedding_sync_attempts(db, embs)
-            synced = 0
-            failed = len(embs)
-
+        synced, failed = await _sync_message_embeddings(db, embs, external_vector_store)
         metrics.message_embeddings_synced += synced
         metrics.message_embeddings_failed += failed
         await db.commit()

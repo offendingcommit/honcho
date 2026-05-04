@@ -20,6 +20,7 @@ from src.reconciler.sync_vectors import (
     ReconciliationMetrics,
     _get_documents_needing_sync,  # pyright: ignore[reportPrivateUsage]
     _get_message_embeddings_needing_sync,  # pyright: ignore[reportPrivateUsage]
+    _reconcile_message_embeddings_batch,  # pyright: ignore[reportPrivateUsage]
     _sync_documents,  # pyright: ignore[reportPrivateUsage]
     _sync_message_embeddings,  # pyright: ignore[reportPrivateUsage]
     run_vector_reconciliation_cycle,
@@ -27,7 +28,6 @@ from src.reconciler.sync_vectors import (
 from src.vector_store import (
     VectorRecord,
     VectorStore,
-    VectorUpsertResult,
     _hash_namespace_components,  # pyright: ignore[reportPrivateUsage]
 )
 
@@ -84,9 +84,7 @@ class TestStateTransitions:
         mock_vector_store.get_vector_namespace = MagicMock(
             return_value=f"honcho.doc.{_hash_namespace_components(workspace.name, peer1.name, peer1.name)}"
         )
-        mock_vector_store.upsert_many = AsyncMock(
-            return_value=VectorUpsertResult(ok=True)
-        )
+        mock_vector_store.upsert_many = AsyncMock(return_value=None)
 
         # Run sync
         synced, failed = await _sync_documents(db_session, docs, mock_vector_store)
@@ -309,13 +307,11 @@ class TestBatchProcessing:
         ) -> str:
             return f"honcho.doc.{_hash_namespace_components(workspace, observer, observed)}"
 
-        async def mock_upsert(
-            namespace: str, vectors: list[VectorRecord]
-        ) -> VectorUpsertResult:
+        async def mock_upsert(namespace: str, vectors: list[VectorRecord]) -> None:
             if namespace not in namespace_calls:
                 namespace_calls[namespace] = []
             namespace_calls[namespace].extend(vectors)
-            return VectorUpsertResult(ok=True)
+            return
 
         mock_vector_store.get_vector_namespace = mock_get_namespace
         mock_vector_store.upsert_many = mock_upsert
@@ -382,6 +378,60 @@ class TestBatchProcessing:
         # Verify batch size respected
         assert len(batch) == 100
 
+    async def test_documents_respect_retry_backoff(
+        self,
+        db_session: AsyncSession,
+        sample_data: tuple[models.Workspace, models.Peer],
+    ) -> None:
+        """Pending documents should only be fetched once their backoff has elapsed."""
+        workspace, peer1 = sample_data
+
+        collection = models.Collection(
+            workspace_name=workspace.name,
+            observer=peer1.name,
+            observed=peer1.name,
+        )
+        db_session.add(collection)
+        await db_session.commit()
+
+        session = models.Session(
+            name=str(generate_nanoid()), workspace_name=workspace.name
+        )
+        db_session.add(session)
+        await db_session.commit()
+
+        now = datetime.datetime.now(datetime.timezone.utc)
+        ineligible_doc = models.Document(
+            content="too soon",
+            workspace_name=workspace.name,
+            observer=peer1.name,
+            observed=peer1.name,
+            session_name=session.name,
+            sync_state="pending",
+            sync_attempts=1,
+            last_sync_at=now - datetime.timedelta(minutes=9, seconds=59),
+            embedding=[1.0] * 1536,
+        )
+        eligible_doc = models.Document(
+            content="ready",
+            workspace_name=workspace.name,
+            observer=peer1.name,
+            observed=peer1.name,
+            session_name=session.name,
+            sync_state="pending",
+            sync_attempts=1,
+            last_sync_at=now - datetime.timedelta(minutes=10, seconds=1),
+            embedding=[2.0] * 1536,
+        )
+        db_session.add_all([ineligible_doc, eligible_doc])
+        await db_session.commit()
+
+        pending = await _get_documents_needing_sync(db_session)
+        pending_ids = {doc.id for doc in pending}
+
+        assert eligible_doc.id in pending_ids
+        assert ineligible_doc.id not in pending_ids
+
 
 @pytest.mark.asyncio
 class TestReEmbedding:
@@ -440,9 +490,7 @@ class TestReEmbedding:
             mock_vector_store.get_vector_namespace = MagicMock(
                 return_value=f"honcho.doc.{_hash_namespace_components(workspace.name, peer1.name, peer1.name)}"
             )
-            mock_vector_store.upsert_many = AsyncMock(
-                return_value=VectorUpsertResult(ok=True)
-            )
+            mock_vector_store.upsert_many = AsyncMock(return_value=None)
 
             # Run sync
             synced, failed = await _sync_documents(db_session, docs, mock_vector_store)
@@ -512,9 +560,7 @@ class TestReEmbedding:
             mock_vector_store.get_vector_namespace = MagicMock(
                 return_value=f"honcho.doc.{_hash_namespace_components(workspace.name, peer1.name, peer1.name)}"
             )
-            mock_vector_store.upsert_many = AsyncMock(
-                return_value=VectorUpsertResult(ok=True)
-            )
+            mock_vector_store.upsert_many = AsyncMock(return_value=None)
 
             # Run sync
             await _sync_documents(db_session, docs, mock_vector_store)
@@ -714,6 +760,33 @@ class TestMessageEmbeddings:
         pending = await _get_message_embeddings_needing_sync(db_session)
         assert any(emb.id == pending_emb.id for emb in pending)
 
+    async def test_message_embeddings_respect_retry_backoff(
+        self,
+        db_session: AsyncSession,
+        sample_data: tuple[models.Workspace, models.Peer],
+    ) -> None:
+        """Pending embeddings should only be fetched once their backoff has elapsed."""
+        workspace, peer = sample_data
+        ineligible_emb = await self._create_pending_message_embedding(
+            db_session, workspace, peer
+        )
+        eligible_emb = await self._create_pending_message_embedding(
+            db_session, workspace, peer
+        )
+
+        now = datetime.datetime.now(datetime.timezone.utc)
+        ineligible_emb.sync_attempts = 1
+        ineligible_emb.last_sync_at = now - datetime.timedelta(minutes=9, seconds=59)
+        eligible_emb.sync_attempts = 1
+        eligible_emb.last_sync_at = now - datetime.timedelta(minutes=10, seconds=1)
+        await db_session.commit()
+
+        pending = await _get_message_embeddings_needing_sync(db_session)
+        pending_ids = {emb.id for emb in pending}
+
+        assert eligible_emb.id in pending_ids
+        assert ineligible_emb.id not in pending_ids
+
     async def test_missing_embeddings_reembedded_and_synced(
         self,
         db_session: AsyncSession,
@@ -772,6 +845,33 @@ class TestMessageEmbeddings:
         assert failed == 1
         assert pending_emb.sync_state in {"pending", "failed"}
         assert pending_emb.sync_attempts == 1
+
+    async def test_unexpected_batch_exception_does_not_bump_unattempted_rows(
+        self,
+        db_session: AsyncSession,
+        sample_data: tuple[models.Workspace, models.Peer],
+        mock_vector_store: VectorStore,
+    ) -> None:
+        """Unexpected wrapper-level failures should not penalize the whole batch."""
+        workspace, peer = sample_data
+        pending_emb = await self._create_pending_message_embedding(
+            db_session, workspace, peer
+        )
+
+        metrics = ReconciliationMetrics()
+        with (
+            patch(
+                "src.reconciler.sync_vectors._sync_message_embeddings",
+                side_effect=RuntimeError("unexpected"),
+            ),
+            pytest.raises(RuntimeError, match="unexpected"),
+        ):
+            await _reconcile_message_embeddings_batch(mock_vector_store, metrics)
+
+        await db_session.refresh(pending_emb)
+        assert pending_emb.sync_state == "pending"
+        assert pending_emb.sync_attempts == 0
+        assert pending_emb.last_sync_at is None
 
 
 @pytest.mark.asyncio
