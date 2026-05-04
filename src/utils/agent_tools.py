@@ -33,6 +33,212 @@ logger = logging.getLogger(__name__)
 MAX_PEER_CARD_FACTS = 40
 
 
+def _normalized_observation_input(
+    obs: schemas.ObservationInput,
+) -> schemas.ObservationInput:
+    """Return an observation input with content normalized for persistence/embedding."""
+    return obs.model_copy(update={"content": obs.content.strip()})
+
+
+def _base_observation_properties() -> dict[str, Any]:
+    return {
+        "content": {
+            "type": "string",
+            "description": "The observation content",
+        },
+        "level": {
+            "type": "string",
+            "enum": [
+                "explicit",
+                "deductive",
+                "inductive",
+                "contradiction",
+            ],
+            "description": (
+                "Level: 'explicit' for direct facts, 'deductive' for logical "
+                + "necessities, 'inductive' for patterns, 'contradiction' for "
+                + "conflicting statements"
+            ),
+        },
+        "source_ids": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": (
+                "Document IDs of source or premise observations. Required and "
+                + "must be non-empty for deductive, inductive, and contradiction "
+                + "observations."
+            ),
+        },
+        "premises": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": "(For deductive) Human-readable premise text for display",
+        },
+        "sources": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": "(For inductive/contradiction) Human-readable source text for display",
+        },
+        "pattern_type": {
+            "type": "string",
+            "enum": [
+                "preference",
+                "behavior",
+                "personality",
+                "tendency",
+                "correlation",
+            ],
+            "description": "(For inductive only) Type of pattern being identified",
+        },
+        "confidence": {
+            "type": "string",
+            "enum": ["high", "medium", "low"],
+            "description": (
+                "(For inductive only) Confidence level: 'high' for 5+ sources, "
+                + "'medium' for 3-4, 'low' for 2"
+            ),
+        },
+    }
+
+
+def _generic_observation_item_schema() -> dict[str, Any]:
+    return {
+        "type": "object",
+        "properties": _base_observation_properties(),
+        "required": ["content", "level"],
+        "additionalProperties": False,
+        "allOf": [
+            {
+                "if": {"properties": {"level": {"const": "deductive"}}},
+                "then": {
+                    "required": ["source_ids", "premises"],
+                    "properties": {
+                        "source_ids": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "minItems": 1,
+                        },
+                        "premises": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "minItems": 1,
+                        },
+                    },
+                },
+            },
+            {
+                "if": {"properties": {"level": {"const": "inductive"}}},
+                "then": {
+                    "required": [
+                        "source_ids",
+                        "sources",
+                        "pattern_type",
+                        "confidence",
+                    ],
+                    "properties": {
+                        "source_ids": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "minItems": 2,
+                        },
+                        "sources": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "minItems": 2,
+                        },
+                    },
+                },
+            },
+            {
+                "if": {"properties": {"level": {"const": "contradiction"}}},
+                "then": {
+                    "required": ["source_ids", "sources"],
+                    "properties": {
+                        "source_ids": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "minItems": 2,
+                        },
+                        "sources": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "minItems": 2,
+                        },
+                    },
+                },
+            },
+        ],
+    }
+
+
+def _deductive_observation_item_schema() -> dict[str, Any]:
+    return {
+        "type": "object",
+        "properties": {
+            "content": {
+                "type": "string",
+                "description": "The deductive conclusion as a self-contained statement",
+            },
+            "source_ids": {
+                "type": "array",
+                "items": {"type": "string"},
+                "minItems": 1,
+                "description": "Required non-empty list of source observation IDs supporting the deduction",
+            },
+            "premises": {
+                "type": "array",
+                "items": {"type": "string"},
+                "minItems": 1,
+                "description": "Required human-readable premise text matching the source observations",
+            },
+        },
+        "required": ["content", "source_ids", "premises"],
+        "additionalProperties": False,
+    }
+
+
+def _inductive_observation_item_schema() -> dict[str, Any]:
+    return {
+        "type": "object",
+        "properties": {
+            "content": {
+                "type": "string",
+                "description": "The inductive pattern or generalization as a self-contained statement",
+            },
+            "source_ids": {
+                "type": "array",
+                "items": {"type": "string"},
+                "minItems": 2,
+                "description": "Required list of at least two source observation IDs supporting the pattern",
+            },
+            "sources": {
+                "type": "array",
+                "items": {"type": "string"},
+                "minItems": 2,
+                "description": "Required human-readable evidence text matching the source observations",
+            },
+            "pattern_type": {
+                "type": "string",
+                "enum": [
+                    "preference",
+                    "behavior",
+                    "personality",
+                    "tendency",
+                    "correlation",
+                ],
+                "description": "Required pattern category",
+            },
+            "confidence": {
+                "type": "string",
+                "enum": ["high", "medium", "low"],
+                "description": "Required confidence level based on evidence count",
+            },
+        },
+        "required": ["content", "source_ids", "sources", "pattern_type", "confidence"],
+        "additionalProperties": False,
+    }
+
+
 def _safe_int(value: Any, default: int) -> int:
     """Coerce a tool input value to int, returning default on failure.
 
@@ -177,88 +383,44 @@ def _extract_pattern_snippet(
 TOOLS: dict[str, dict[str, Any]] = {
     "create_observations": {
         "name": "create_observations",
-        "description": "Create observations at any level: explicit (facts), deductive (logical necessities), inductive (patterns), or contradiction (conflicting statements). Use this to record facts, logical inferences, patterns, or note when the user has said contradictory things.",
+        "description": "Create observations at any level: explicit (facts), deductive (logical necessities), inductive (patterns), or contradiction (conflicting statements). For deductive, inductive, and contradiction observations, missing or empty source_ids are invalid and will be rejected.",
         "input_schema": {
             "type": "object",
             "properties": {
                 "observations": {
                     "type": "array",
                     "description": "List of observations to create",
-                    "items": {
-                        "type": "object",
-                        "properties": {
-                            "content": {
-                                "type": "string",
-                                "description": "The observation content",
-                            },
-                            "level": {
-                                "type": "string",
-                                "enum": [
-                                    "explicit",
-                                    "deductive",
-                                    "inductive",
-                                    "contradiction",
-                                ],
-                                "description": "Level: 'explicit' for direct facts, 'deductive' for logical necessities, 'inductive' for patterns, 'contradiction' for conflicting statements",
-                            },
-                            "source_ids": {
-                                "type": "array",
-                                "items": {"type": "string"},
-                                "description": "(For deductive/inductive/contradiction) Document IDs of source/premise observations - REQUIRED",
-                            },
-                            "premises": {
-                                "type": "array",
-                                "items": {"type": "string"},
-                                "description": "(For deductive) Human-readable premise text for display",
-                            },
-                            "sources": {
-                                "type": "array",
-                                "items": {"type": "string"},
-                                "description": "(For inductive/contradiction) Human-readable source text for display",
-                            },
-                            "pattern_type": {
-                                "type": "string",
-                                "enum": [
-                                    "preference",
-                                    "behavior",
-                                    "personality",
-                                    "tendency",
-                                    "correlation",
-                                ],
-                                "description": "(For inductive only) Type of pattern being identified",
-                            },
-                            "confidence": {
-                                "type": "string",
-                                "enum": ["high", "medium", "low"],
-                                "description": "(For inductive only) Confidence level: 'high' for 3+ sources, 'medium' for 2+, 'low' for tentative",
-                            },
-                        },
-                        "required": ["content", "level"],
-                    },
+                    "items": _generic_observation_item_schema(),
                 },
             },
             "required": ["observations"],
         },
     },
     "create_observations_deductive": {
-        "name": "create_observations",
-        "description": "Create new deductive observations discovered while answering the query. Use this when you infer something new about the peer that isn't already captured in existing observations. Only use for novel deductions - not for restating existing facts.",
+        "name": "create_observations_deductive",
+        "description": "Create new deductive observations discovered while answering the query. Every observation must include non-empty source_ids and premise text. Use this only for novel deductions grounded in existing observations.",
         "input_schema": {
             "type": "object",
             "properties": {
                 "observations": {
                     "type": "array",
                     "description": "List of new deductive observations to create",
-                    "items": {
-                        "type": "object",
-                        "properties": {
-                            "content": {
-                                "type": "string",
-                                "description": "The observation content - should be a self-contained statement about the peer",
-                            },
-                        },
-                        "required": ["content"],
-                    },
+                    "items": _deductive_observation_item_schema(),
+                },
+            },
+            "required": ["observations"],
+        },
+    },
+    "create_observations_inductive": {
+        "name": "create_observations_inductive",
+        "description": "Create new inductive observations discovered while answering the query. Every observation must include source_ids, source text, pattern_type, and confidence. Use this only for patterns supported by multiple observations.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "observations": {
+                    "type": "array",
+                    "description": "List of new inductive observations to create",
+                    "items": _inductive_observation_item_schema(),
                 },
             },
             "required": ["observations"],
@@ -595,7 +757,7 @@ DEDUCTION_SPECIALIST_TOOLS: list[dict[str, Any]] = [
     TOOLS["search_memory"],
     TOOLS["search_messages"],
     # Action tools
-    TOOLS["create_observations"],
+    TOOLS["create_observations_deductive"],
     TOOLS["delete_observations"],
     TOOLS["update_peer_card"],
 ]
@@ -610,7 +772,7 @@ INDUCTION_SPECIALIST_TOOLS: list[dict[str, Any]] = [
     TOOLS["search_memory"],
     TOOLS["search_messages"],
     # Action tools
-    TOOLS["create_observations"],
+    TOOLS["create_observations_inductive"],
     TOOLS["update_peer_card"],
 ]
 
@@ -645,6 +807,13 @@ async def create_observations(
         logger.warning("create_observations called with empty list")
         return ObservationsCreatedResult(created_count=0, created_levels=[], failed=[])
 
+    normalized_observations = [
+        _normalized_observation_input(obs) for obs in observations if obs.content.strip()
+    ]
+    if not normalized_observations:
+        logger.info("No non-empty observations to create")
+        return ObservationsCreatedResult(created_count=0, created_levels=[], failed=[])
+
     # Phase 1: Ensure collection exists (short DB scope)
     async with tracked_db("create_observations.collection") as db:
         await crud.get_or_create_collection(
@@ -655,12 +824,12 @@ async def create_observations(
         )
 
     # Phase 2: Compute embeddings (no DB needed)
-    contents = [obs.content for obs in observations]
+    contents = [obs.content for obs in normalized_observations]
     embeddings_by_index: dict[int, list[float]] | None = None
     try:
         embeddings = await embedding_client.simple_batch_embed(contents)
         embeddings_by_index = dict(
-            zip(range(len(observations)), embeddings, strict=True)
+            zip(range(len(normalized_observations)), embeddings, strict=True)
         )
     except Exception as e:
         logger.warning(
@@ -671,7 +840,7 @@ async def create_observations(
     # Build document objects with pre-computed embeddings
     documents: list[schemas.DocumentCreate] = []
     failed: list[ObservationFailure] = []
-    for i, obs in enumerate(observations):
+    for i, obs in enumerate(normalized_observations):
         embedding: list[float]
         if embeddings_by_index is not None:
             embedding = embeddings_by_index[i]
@@ -854,6 +1023,7 @@ async def get_observation_context(
     workspace_name: str,
     session_name: str | None,
     message_ids: list[str],
+    observer: str | None = None,
 ) -> list[models.Message]:
     """
     Retrieve messages for given message IDs along with surrounding context.
@@ -867,12 +1037,25 @@ async def get_observation_context(
         workspace_name: Workspace identifier
         session_name: Session identifier (optional)
         message_ids: List of message IDs to retrieve
+        observer: When provided and session_name is None, scope results
+            to sessions this peer belongs to
 
     Returns:
         List of messages in chronological order, including the requested messages and surrounding context
     """
     if not message_ids:
         return []
+
+    # Pre-fetch peer session scope if needed
+    allowed_session_names: list[str] | None = None
+    if observer and not session_name:
+        from src.crud.message import get_peer_session_names
+
+        allowed_session_names = await get_peer_session_names(
+            db, workspace_name, observer
+        )
+        if not allowed_session_names:
+            return []
 
     # Use a CTE to get seq_in_session values for target messages
     stmt = (
@@ -883,6 +1066,8 @@ async def get_observation_context(
 
     if session_name:
         stmt = stmt.where(models.Message.session_name == session_name)
+    elif allowed_session_names is not None:
+        stmt = stmt.where(models.Message.session_name.in_(allowed_session_names))
 
     target_seqs_cte = stmt.cte("target_seqs")
 
@@ -905,6 +1090,8 @@ async def get_observation_context(
 
     if session_name:
         stmt = stmt.where(models.Message.session_name == session_name)
+    elif allowed_session_names is not None:
+        stmt = stmt.where(models.Message.session_name.in_(allowed_session_names))
 
     result = await db.execute(stmt)
     messages = list(result.scalars().all())
@@ -916,6 +1103,7 @@ async def extract_preferences(
     workspace_name: str,
     session_name: str | None,
     observed: str,
+    observer: str | None = None,
 ) -> dict[str, list[str]]:
     """
     Extract user preferences and standing instructions from conversation history.
@@ -927,6 +1115,8 @@ async def extract_preferences(
         workspace_name: Workspace identifier
         session_name: Session identifier (optional)
         observed: The peer whose preferences to extract
+        observer: When provided and session_name is None, scope results
+            to sessions this peer belongs to
 
     Returns:
         Dict with 'messages' list containing potentially relevant messages
@@ -959,27 +1149,26 @@ async def extract_preferences(
 
     for query in semantic_queries:
         try:
-            async with tracked_db("extract_preferences") as db:
-                snippets = await crud.search_messages(
-                    db,
-                    workspace_name=workspace_name,
-                    session_name=session_name,
-                    query=query,
-                    limit=10,
-                    context_window=0,
-                    embedding=(
-                        query_embeddings_by_query.get(query)
-                        if query_embeddings_by_query is not None
-                        else None
-                    ),
-                )
-                for matches, _ in snippets:
-                    for msg in matches:
-                        if msg.peer_name == observed:
-                            content_key = msg.content[:100].lower()
-                            if content_key not in seen_content:
-                                seen_content.add(content_key)
-                                messages.append(f"'{msg.content.strip()}'")
+            snippets = await crud.search_messages(
+                workspace_name=workspace_name,
+                session_name=session_name,
+                query=query,
+                limit=10,
+                context_window=0,
+                embedding=(
+                    query_embeddings_by_query.get(query)
+                    if query_embeddings_by_query is not None
+                    else None
+                ),
+                observer=observer,
+            )
+            for matches, _ in snippets:
+                for msg in matches:
+                    if msg.peer_name == observed:
+                        content_key = msg.content[:100].lower()
+                        if content_key not in seen_content:
+                            seen_content.add(content_key)
+                            messages.append(f"'{msg.content.strip()}'")
         except Exception as e:
             logger.warning("Error in semantic search for '%s': %s", query, e)
 
@@ -1013,8 +1202,11 @@ class ToolContext:
     parent_category: str | None = None  # Parent category for CloudEvents
 
 
-async def _handle_create_observations(
-    ctx: ToolContext, tool_input: dict[str, Any]
+async def _handle_create_observations_impl(
+    ctx: ToolContext,
+    tool_input: dict[str, Any],
+    *,
+    forced_level: str | None = None,
 ) -> str:
     """Handle create_observations tool."""
     raw_observations = tool_input.get("observations", [])
@@ -1025,7 +1217,10 @@ async def _handle_create_observations(
     # Set context-specific default level before Pydantic validation
     default_level = "explicit" if ctx.current_messages else "deductive"
     for obs in raw_observations:
-        obs.setdefault("level", default_level)
+        if forced_level is not None:
+            obs["level"] = forced_level
+        else:
+            obs.setdefault("level", default_level)
 
     # Validate observations individually so valid ones are still processed
     observations: list[schemas.ObservationInput] = []
@@ -1117,6 +1312,32 @@ async def _handle_create_observations(
         response += f"\nFailed {len(all_failures)}: {failure_details}"
 
     return response
+
+
+async def _handle_create_observations(
+    ctx: ToolContext, tool_input: dict[str, Any]
+) -> str:
+    return await _handle_create_observations_impl(ctx, tool_input)
+
+
+async def _handle_create_observations_deductive(
+    ctx: ToolContext, tool_input: dict[str, Any]
+) -> str:
+    return await _handle_create_observations_impl(
+        ctx,
+        tool_input,
+        forced_level="deductive",
+    )
+
+
+async def _handle_create_observations_inductive(
+    ctx: ToolContext, tool_input: dict[str, Any]
+) -> str:
+    return await _handle_create_observations_impl(
+        ctx,
+        tool_input,
+        forced_level="inductive",
+    )
 
 
 async def _handle_update_peer_card(ctx: ToolContext, tool_input: dict[str, Any]) -> str:
@@ -1243,7 +1464,10 @@ async def _handle_search_memory(ctx: ToolContext, tool_input: dict[str, Any]) ->
     try:
         query_embedding = await embedding_client.embed(query)
     except ValueError:
-        return f"ERROR: Query exceeds maximum token limit of {settings.MAX_EMBEDDING_TOKENS}. Please use a shorter query."
+        return (
+            "ERROR: Query exceeds maximum token limit of "
+            + f"{settings.EMBEDDING.MAX_INPUT_TOKENS}. Please use a shorter query."
+        )
 
     documents = await crud.query_documents(
         db=None,
@@ -1265,20 +1489,19 @@ async def _handle_search_memory(ctx: ToolContext, tool_input: dict[str, Any]) ->
         if ctx.agent_type == "dialectic":
             limit = min(_safe_int(tool_input.get("top_k"), 20), 20)
             message_output = None
-            async with tracked_db("tool.search_memory.fallback") as db:
-                snippets = await crud.search_messages(
-                    db,
-                    workspace_name=ctx.workspace_name,
-                    session_name=ctx.session_name,
-                    query=query,
-                    limit=limit,
-                    context_window=0,
-                    embedding=query_embedding,
+            snippets = await crud.search_messages(
+                workspace_name=ctx.workspace_name,
+                session_name=ctx.session_name,
+                query=query,
+                limit=limit,
+                context_window=0,
+                embedding=query_embedding,
+                observer=ctx.observer,
+            )
+            if snippets:
+                message_output = _format_message_snippets(
+                    snippets, f"for query '{query}'"
                 )
-                if snippets:
-                    message_output = _format_message_snippets(
-                        snippets, f"for query '{query}'"
-                    )
             if message_output:
                 return (
                     f"No observations yet. Message search results:\n\n{message_output}"
@@ -1302,6 +1525,7 @@ async def _handle_get_observation_context(
             workspace_name=ctx.workspace_name,
             session_name=ctx.session_name,
             message_ids=tool_input["message_ids"],
+            observer=ctx.observer,
         )
         if not messages:
             return f"No messages found for IDs {tool_input['message_ids']}"
@@ -1326,19 +1550,18 @@ async def _handle_search_messages(ctx: ToolContext, tool_input: dict[str, Any]) 
     # Pre-compute embedding outside DB session to avoid holding a connection
     # during the external API call (same pattern as _handle_search_memory).
     query_embedding = await embedding_client.embed(query)
-    async with tracked_db("tool.search_messages") as db:
-        snippets = await crud.search_messages(
-            db,
-            workspace_name=ctx.workspace_name,
-            session_name=ctx.session_name,
-            query=query,
-            limit=limit,
-            context_window=2,
-            embedding=query_embedding,
-        )
-        if not snippets:
-            return f"No messages found for query '{query}'"
-        formatted = _format_message_snippets(snippets, f"for query '{query}'")
+    snippets = await crud.search_messages(
+        workspace_name=ctx.workspace_name,
+        session_name=ctx.session_name,
+        query=query,
+        limit=limit,
+        context_window=2,
+        embedding=query_embedding,
+        observer=ctx.observer,
+    )
+    if not snippets:
+        return f"No messages found for query '{query}'"
+    formatted = _format_message_snippets(snippets, f"for query '{query}'")
     return formatted
 
 
@@ -1352,35 +1575,32 @@ async def _handle_grep_messages(ctx: ToolContext, tool_input: dict[str, Any]) ->
         _safe_int(tool_input.get("context_window"), 2), 2
     )  # Cap context
 
-    async with tracked_db("tool.grep_messages") as db:
-        snippets = await crud.grep_messages(
-            db,
-            workspace_name=ctx.workspace_name,
-            session_name=ctx.session_name,
-            text=text,
-            limit=limit,
-            context_window=context_window,
-        )
-        if not snippets:
-            return f"No messages found containing '{text}'"
+    snippets = await crud.grep_messages(
+        workspace_name=ctx.workspace_name,
+        session_name=ctx.session_name,
+        text=text,
+        limit=limit,
+        context_window=context_window,
+        observer=ctx.observer,
+    )
+    if not snippets:
+        return f"No messages found containing '{text}'"
 
-        # Format with pattern-based snippet extraction
-        snippet_texts: list[str] = []
-        total_matches = sum(len(matches) for matches, _ in snippets)
-        for i, (matches, context) in enumerate(snippets, 1):
-            lines: list[str] = []
-            for msg in context:
-                truncated = _extract_pattern_snippet(msg.content, text)
-                lines.append(
-                    format_new_turn_with_timestamp(
-                        truncated, msg.created_at, msg.peer_name
-                    )
-                )
-            sess = context[0].session_name if context else "unknown"
-            snippet_texts.append(
-                f"--- Snippet {i} (session: {sess}, {len(matches)} match(es)) ---\n"
-                + "\n".join(lines)
+    # Format with pattern-based snippet extraction
+    snippet_texts: list[str] = []
+    total_matches = sum(len(matches) for matches, _ in snippets)
+    for i, (matches, context) in enumerate(snippets, 1):
+        lines: list[str] = []
+        for msg in context:
+            truncated = _extract_pattern_snippet(msg.content, text)
+            lines.append(
+                format_new_turn_with_timestamp(truncated, msg.created_at, msg.peer_name)
             )
+        sess = context[0].session_name if context else "unknown"
+        snippet_texts.append(
+            f"--- Snippet {i} (session: {sess}, {len(matches)} match(es)) ---\n"
+            + "\n".join(lines)
+        )
 
     output = (
         f"Found {total_matches} messages containing '{text}' in {len(snippets)} conversation snippets:\n\n"
@@ -1425,6 +1645,7 @@ async def _handle_get_messages_by_date_range(
             before_date=before_date,
             limit=limit,
             order=order,
+            observer=ctx.observer,
         )
         msg_count = len(messages)
         messages_text = (
@@ -1483,31 +1704,28 @@ async def _handle_search_messages_temporal(
     # Pre-compute embedding outside DB session to avoid holding a connection
     # during the external API call.
     query_embedding = await embedding_client.embed(query)
-    async with tracked_db("tool.search_messages_temporal") as db:
-        snippets = await crud.search_messages_temporal(
-            db,
-            workspace_name=ctx.workspace_name,
-            session_name=ctx.session_name,
-            query=query,
-            after_date=after_date,
-            before_date=before_date,
-            limit=limit,
-            context_window=context_window,
-            embedding=query_embedding,
-        )
-        date_filter: list[str] = []
-        if after_date_str:
-            date_filter.append(f"after {after_date_str}")
-        if before_date_str:
-            date_filter.append(f"before {before_date_str}")
-        filter_desc = f" ({' and '.join(date_filter)})" if date_filter else ""
+    snippets = await crud.search_messages_temporal(
+        workspace_name=ctx.workspace_name,
+        session_name=ctx.session_name,
+        query=query,
+        after_date=after_date,
+        before_date=before_date,
+        limit=limit,
+        context_window=context_window,
+        embedding=query_embedding,
+        observer=ctx.observer,
+    )
+    date_filter: list[str] = []
+    if after_date_str:
+        date_filter.append(f"after {after_date_str}")
+    if before_date_str:
+        date_filter.append(f"before {before_date_str}")
+    filter_desc = f" ({' and '.join(date_filter)})" if date_filter else ""
 
-        if not snippets:
-            return f"No messages found for query '{query}'{filter_desc}"
+    if not snippets:
+        return f"No messages found for query '{query}'{filter_desc}"
 
-        formatted = _format_message_snippets(
-            snippets, f"for query '{query}'{filter_desc}"
-        )
+    formatted = _format_message_snippets(snippets, f"for query '{query}'{filter_desc}")
     return formatted
 
 
@@ -1608,22 +1826,24 @@ async def _handle_delete_observations(
     if not observation_ids:
         return "ERROR: observation_ids list is empty"
 
-    deleted_count = 0
     async with ctx.db_lock, tracked_db("tool.delete_observations") as db:
-        for obs_id in observation_ids:
-            try:
-                await crud.delete_document(
-                    db,
-                    workspace_name=ctx.workspace_name,
-                    document_id=obs_id,
-                    observer=ctx.observer,
-                    observed=ctx.observed,
-                )
-                deleted_count += 1
-            except Exception as e:
-                logger.warning("Failed to delete observation %s: %s", obs_id, e)
+        deleted = await crud.delete_documents(
+            db,
+            workspace_name=ctx.workspace_name,
+            document_ids=observation_ids,
+            observer=ctx.observer,
+            observed=ctx.observed,
+        )
 
-    # Emit telemetry event if context is available
+    deleted_ids = {doc_id for doc_id, _ in deleted}
+    for obs_id in observation_ids:
+        if obs_id not in deleted_ids:
+            logger.warning(
+                "Failed to delete observation %s (not found, already deleted, or wrong scope)",
+                obs_id,
+            )
+
+    deleted_count = len(deleted)
     if deleted_count > 0 and ctx.run_id and ctx.agent_type and ctx.parent_category:
         emit(
             AgentToolConclusionsDeletedEvent(
@@ -1635,6 +1855,7 @@ async def _handle_delete_observations(
                 observer=ctx.observer,
                 observed=ctx.observed,
                 conclusion_count=deleted_count,
+                levels=[level for _, level in deleted],
             )
         )
 
@@ -1659,6 +1880,7 @@ async def _handle_extract_preferences(
         workspace_name=ctx.workspace_name,
         session_name=ctx.session_name,
         observed=ctx.observed,
+        observer=ctx.observer,
     )
 
     messages = results.get("messages", [])
@@ -1799,6 +2021,8 @@ async def _handle_get_reasoning_chain(
 # Tool handler dispatch table
 _TOOL_HANDLERS: dict[str, Callable[[ToolContext, dict[str, Any]], Any]] = {
     "create_observations": _handle_create_observations,
+    "create_observations_deductive": _handle_create_observations_deductive,
+    "create_observations_inductive": _handle_create_observations_inductive,
     "update_peer_card": _handle_update_peer_card,
     "get_recent_history": _handle_get_recent_history,
     "search_memory": _handle_search_memory,
