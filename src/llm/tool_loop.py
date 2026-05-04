@@ -20,6 +20,8 @@ from tenacity import retry, stop_after_attempt, wait_exponential
 
 from src.config import ModelTransport
 from src.exceptions import ValidationException
+from src.telemetry.llm_call_metrics import normalize_feature_label
+from src.telemetry.prometheus import prometheus_metrics
 from src.utils.types import set_current_iteration
 
 from .executor import honcho_llm_call_inner
@@ -166,6 +168,8 @@ async def execute_tool_loop(
     before_retry_callback: Callable[[Any], None],
     stream_final: bool = False,
     iteration_callback: IterationCallback | None = None,
+    track_name: str | None = None,
+    trace_name: str | None = None,
 ) -> HonchoLLMCallResponse[Any] | StreamingResponseWithMetadata:
     """Run the iterative tool calling loop for agentic LLM interactions.
 
@@ -187,6 +191,8 @@ async def execute_tool_loop(
             + f"[{MIN_TOOL_ITERATIONS}, {MAX_TOOL_ITERATIONS}]; "
             + f"got {max_tool_iterations}"
         )
+
+    feature_label = normalize_feature_label(track_name, trace_name)
 
     conversation_messages: list[dict[str, Any]] = (
         messages.copy() if messages else [{"role": "user", "content": prompt}]
@@ -351,6 +357,11 @@ async def execute_tool_loop(
                         "tool_result": tool_result,
                     }
                 )
+                prometheus_metrics.record_llm_tool_call(
+                    feature=feature_label,
+                    tool_name=tool_name,
+                    outcome="success",
+                )
             except Exception as e:
                 logger.error(f"Tool execution failed for {tool_name}: {e}")
                 tool_results.append(
@@ -360,6 +371,11 @@ async def execute_tool_loop(
                         "result": f"Error: {str(e)}",
                         "is_error": True,
                     }
+                )
+                prometheus_metrics.record_llm_tool_call(
+                    feature=feature_label,
+                    tool_name=tool_name,
+                    outcome="error",
                 )
 
         append_tool_results(current_provider, tool_results, conversation_messages)
@@ -470,6 +486,7 @@ async def execute_tool_loop(
     final_response = await final_call_func()
     final_response.tool_calls_made = all_tool_calls
     final_response.iterations = iteration + 1
+    final_response.hit_max_iterations = True
     final_response.input_tokens = total_input_tokens + final_response.input_tokens
     final_response.output_tokens = total_output_tokens + final_response.output_tokens
     final_response.cache_creation_input_tokens = (
