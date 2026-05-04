@@ -84,21 +84,25 @@ All API routes follow the pattern: `/v1/{resource}/{id}/{action}`
 - Typechecking: `uv run basedpyright`
 - Format code: `uv run ruff format src/`
 
-### LLM provider gotchas (learned 2026-04-16 in k8s deploy)
+### LLM provider routing (current as of 2026-05-04 upstream sync)
 
-- **Structured outputs (`response_format={"type": "json_schema"}`) only work on providers whose upstream API natively honors them.** Google Gemini does (route via `cf` provider with base_url ending in `/openai`). Ollama Cloud (reached via the `custom` provider + `custom-ollama` CF gateway endpoint, or any direct Ollama endpoint) does **not** translate `response_format` into Ollama's native JSON-mode — every Ollama Cloud model (GLM-5.1, nemotron-3-nano, qwen3.5, devstral-small-2 confirmed) returns free-form text/markdown when a schema is requested, and `honcho_llm_call` bubbles a `ValidationError: Invalid JSON` out of pydantic parsing.
-- **Therefore: deriver (`src/deriver/deriver.py:126`) and summary (`src/utils/summarizer.py`) must stay on a Gemini-backed `cf` provider.** Dream, dialectic, and any free-form / tool-call path is free to use the `custom` provider.
-- **Gemini `thoughtSignature` round-tripping breaks on the CF `openai`-compat route.** Any call with `maxToolIterations > 1` AND `thinkingBudgetTokens > 0` will return `400 Function call is missing a thought_signature` on iteration 2+. If you need thinking on a multi-iteration tool loop, use the native Gemini provider, not the OpenAI-compat route — or set `thinkingBudgetTokens=0`.
-- **None of this is Cloudflare's fault.** CF AI Gateway is a transparent proxy in both the `openai` and `custom-ollama` routes. The limitations live at the upstream provider (Ollama Cloud's OpenAI-compat layer).
+The legacy `cf` and `custom` provider tags are gone. Transport is `Literal["anthropic", "openai", "gemini"]` only — see `src/llm/registry.py`. Per-component routing happens via `<COMPONENT>_MODEL_CONFIG__*` env vars (Pydantic settings with `env_nested_delimiter="__"`).
+
+- **CF Gateway integration is app-level now**, not deployment-level. `src/llm/registry.py` and `src/embedding_client.py` auto-inject `cf-aig-authorization: Bearer $LLM_CF_GATEWAY_AUTH_TOKEN` on any override client whose `base_url` contains `gateway.ai.cloudflare.com`. Set `LLM_CF_GATEWAY_AUTH_TOKEN` once globally; the rest is per-component `OVERRIDES__BASE_URL`.
+- **Native Gemini works for json_schema.** The new `GeminiBackend` (`src/llm/backends/gemini.py`) talks Gemini's native protocol — `response_format=json_schema` is honored server-side. Route through CF Gateway with `base_url: https://gateway.ai.cloudflare.com/v1/<acct>/<gw>/google-ai-studio` (note: NO `/openai` suffix — that path was the old OpenAI-compat shim that silently dropped json_schema, deriver/summary used to need workarounds for it).
+- **Native Gemini also fixes `thoughtSignature` round-tripping** — `src/llm/history_adapters.py:77-78` and `src/llm/executor.py:43-44` preserve it across tool iterations. The old "set `thinkingBudgetTokens=0` for multi-iter tool loops" workaround is no longer needed.
+- **Ollama Cloud routing**: `transport: openai` + `base_url: https://gateway.ai.cloudflare.com/v1/<acct>/<gw>/custom-ollama`. Pass the Ollama Cloud key via `MODEL_CONFIG__OVERRIDES__API_KEY_ENV: <env_var_name>` so the secret is referenced not duplicated. Note that `_uses_max_completion_tokens()` in `src/llm/backends/openai.py:21` only fires for gpt-5/o-series models — Ollama Cloud chat models stay on `max_tokens`.
+- **`response_format=json_schema` still doesn't work over Ollama Cloud's OpenAI-compat layer.** Free-form / tool-call paths are fine; structured-output paths must use a transport whose upstream honors schemas (anthropic, openai/gpt-5+, or gemini-native).
+- **CF AI Gateway** remains a transparent proxy. Limitations are upstream-side; the `cf-aig-authorization` header is the only CF-specific concern in app code.
 
 ### Local LM Studio Setup
 
-- Honcho can use LM Studio for generation through the `custom` provider path.
+- Honcho can use LM Studio via `transport: openai` + `MODEL_CONFIG__OVERRIDES__BASE_URL: http://localhost:1234/v1`.
 - Keep `LLM_OPENAI_API_KEY` configured for embeddings unless embedding support is added for local models.
-- For Docker Compose, `LLM_OPENAI_COMPATIBLE_BASE_URL` must be `http://host.docker.internal:1234/v1`, not `http://localhost:1234/v1`.
-- `LLM_OPENAI_COMPATIBLE_API_KEY=lm-studio` is sufficient for local use.
+- For Docker Compose, the per-component `MODEL_CONFIG__OVERRIDES__BASE_URL` must be `http://host.docker.internal:1234/v1`, not `http://localhost:1234/v1`.
+- Pass `MODEL_CONFIG__OVERRIDES__API_KEY: lm-studio` (or any non-empty placeholder); LM Studio doesn't validate it.
 - Current local default model is `qwen2.5-14b-instruct`.
-- When overriding `DIALECTIC_LEVELS__*` via env vars, each level needs its full required settings, not just `PROVIDER` and `MODEL`. Include `THINKING_BUDGET_TOKENS` and `MAX_TOOL_ITERATIONS`, and optionally `MAX_OUTPUT_TOKENS`.
+- When overriding `DIALECTIC_LEVELS__*` via env vars, each level needs its full required settings, not just `MODEL_CONFIG__TRANSPORT` and `__MODEL`. Include `__THINKING_BUDGET_TOKENS` and `MAX_TOOL_ITERATIONS`, and optionally `MAX_OUTPUT_TOKENS`. For backups, use the nested `__MODEL_CONFIG__FALLBACK__TRANSPORT` / `__MODEL` shape.
 - Docker should own the runtime environment completely. Do not mount the repo onto `/app` and do not mount a named volume onto `/app/.venv`, or the image-built environment can be hidden and replaced with incompatible artifacts.
 - If Docker services fail with missing Python modules or incompatible native extensions, rebuild the image instead of trying to repair the environment in-place:
 
