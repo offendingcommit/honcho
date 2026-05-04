@@ -64,6 +64,24 @@ class DialecticComponents(Enum):
     TOTAL = "total"
 
 
+class LLMCallOutcome(Enum):
+    """Terminal outcome of a single `honcho_llm_call`.
+
+    Distinguishes "model didn't converge" (max_iterations) from "infra broke"
+    (timeout/validation/other) so dashboards and alerts can target each
+    independently. `success_via_backup` is its own bucket so silent failover
+    rate is observable without parsing logs.
+    """
+
+    SUCCESS = "success"
+    SUCCESS_AFTER_RETRY = "success_after_retry"
+    SUCCESS_VIA_BACKUP = "success_via_backup"
+    ERROR_TIMEOUT = "error_timeout"
+    ERROR_VALIDATION = "error_validation"
+    ERROR_MAX_ITERATIONS = "error_max_iterations"
+    ERROR_OTHER = "error_other"
+
+
 api_requests_counter = NamespacedCounter(
     "api_requests",
     "Total API requests",
@@ -190,6 +208,61 @@ session_queue_oldest_age_gauge = NamespacedGauge(
     "session_queue_oldest_age_seconds",
     "Age in seconds of the oldest queue item by workspace, session, and state",
     ["namespace", "workspace_name", "session_name", "state"],
+)
+
+# ---- Per-LLM-call observability ---------------------------------------------
+# Cardinality budget: feature ~6, provider ~4, model ~10, outcome 7 → ~1.7k
+# series cap. Deliberately no workspace_name label here: the question these
+# answer is "is this model effective for this feature", not "is workspace X
+# slow". Per-workspace LLM behavior shows up in dialectic_calls + token
+# counters which already carry workspace_name.
+
+llm_calls_counter = NamespacedCounter(
+    "llm_calls",
+    "Total honcho_llm_call invocations by feature, provider, model, outcome",
+    ["namespace", "feature", "provider", "model", "outcome"],
+)
+
+llm_call_duration_histogram = NamespacedHistogram(
+    "llm_call_duration_seconds",
+    "End-to-end honcho_llm_call latency (includes retries and backup failover)",
+    ["namespace", "feature", "provider", "model", "outcome"],
+    buckets=(0.1, 0.5, 1, 2, 5, 10, 30, 60, 120, 300, 600, 1800, 3600),
+)
+
+# Distinct from the existing deriver/dialectic/dreamer token counters:
+# this one carries provider+model so we can answer "tokens through gemini
+# vs glm-5.1" without bouncing through Langfuse.
+llm_tokens_counter = NamespacedCounter(
+    "llm_tokens",
+    "LLM tokens by feature/provider/model/token_type",
+    ["namespace", "feature", "provider", "model", "token_type"],
+)
+
+llm_tool_calls_counter = NamespacedCounter(
+    "llm_tool_calls",
+    "Individual tool invocations within an LLM tool loop",
+    ["namespace", "feature", "tool_name", "outcome"],
+)
+
+llm_iterations_histogram = NamespacedHistogram(
+    "llm_iterations",
+    "Tool-loop iterations consumed per call (1 = no tool calls)",
+    ["namespace", "feature", "outcome"],
+    buckets=(1, 2, 3, 4, 5, 7, 10, 15, 20, 30, 50),
+)
+
+llm_backup_used_counter = NamespacedCounter(
+    "llm_backup_used",
+    "Counts when a call's retry chain switched from primary to backup provider",
+    [
+        "namespace",
+        "feature",
+        "primary_provider",
+        "primary_model",
+        "backup_provider",
+        "backup_model",
+    ],
 )
 
 
@@ -524,6 +597,103 @@ class PrometheusMetrics:
             ).set(age_seconds)
         except Exception as e:
             self._handle_metric_error("set_session_queue_oldest_age", e)
+
+    def record_llm_call(
+        self,
+        *,
+        feature: str,
+        provider: str,
+        model: str,
+        outcome: str,
+        duration_seconds: float,
+    ) -> None:
+        try:
+            llm_calls_counter.labels(
+                feature=feature,
+                provider=provider,
+                model=model,
+                outcome=outcome,
+            ).inc()
+            llm_call_duration_histogram.labels(
+                feature=feature,
+                provider=provider,
+                model=model,
+                outcome=outcome,
+            ).observe(duration_seconds)
+        except Exception as e:
+            self._handle_metric_error("record_llm_call", e)
+
+    def record_llm_tokens(
+        self,
+        *,
+        feature: str,
+        provider: str,
+        model: str,
+        token_type: str,
+        count: int,
+    ) -> None:
+        if count <= 0:
+            return
+        try:
+            llm_tokens_counter.labels(
+                feature=feature,
+                provider=provider,
+                model=model,
+                token_type=token_type,
+            ).inc(count)
+        except Exception as e:
+            self._handle_metric_error("record_llm_tokens", e)
+
+    def record_llm_tool_call(
+        self,
+        *,
+        feature: str,
+        tool_name: str,
+        outcome: str,
+    ) -> None:
+        try:
+            llm_tool_calls_counter.labels(
+                feature=feature,
+                tool_name=tool_name,
+                outcome=outcome,
+            ).inc()
+        except Exception as e:
+            self._handle_metric_error("record_llm_tool_call", e)
+
+    def observe_llm_iterations(
+        self,
+        *,
+        feature: str,
+        outcome: str,
+        iterations: int,
+    ) -> None:
+        try:
+            llm_iterations_histogram.labels(
+                feature=feature,
+                outcome=outcome,
+            ).observe(iterations)
+        except Exception as e:
+            self._handle_metric_error("observe_llm_iterations", e)
+
+    def record_llm_backup_used(
+        self,
+        *,
+        feature: str,
+        primary_provider: str,
+        primary_model: str,
+        backup_provider: str,
+        backup_model: str,
+    ) -> None:
+        try:
+            llm_backup_used_counter.labels(
+                feature=feature,
+                primary_provider=primary_provider,
+                primary_model=primary_model,
+                backup_provider=backup_provider,
+                backup_model=backup_model,
+            ).inc()
+        except Exception as e:
+            self._handle_metric_error("record_llm_backup_used", e)
 
 
 prometheus_metrics = PrometheusMetrics()
