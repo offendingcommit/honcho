@@ -123,6 +123,37 @@ async def test_anthropic_backend_skips_assistant_prefill_for_claude_4_models() -
 
 
 @pytest.mark.asyncio
+async def test_anthropic_backend_maps_deepseek_thinking_effort() -> None:
+    client = Mock()
+    client.messages.create = AsyncMock(
+        return_value=SimpleNamespace(
+            content=[TextBlock(type="text", text="Hello from DeepSeek")],
+            usage=SimpleNamespace(
+                input_tokens=10,
+                output_tokens=5,
+                cache_creation_input_tokens=0,
+                cache_read_input_tokens=0,
+            ),
+            stop_reason="end_turn",
+        )
+    )
+
+    backend = AnthropicBackend(client)
+    result = await backend.complete(
+        model="deepseek-v4-pro",
+        messages=[{"role": "user", "content": "Hello"}],
+        max_tokens=100,
+        thinking_effort="xhigh",
+    )
+
+    assert result.content == "Hello from DeepSeek"
+    await_args = client.messages.create.await_args
+    if await_args is None:
+        raise AssertionError("Expected Anthropic client call")
+    assert await_args.kwargs["output_config"] == {"effort": "max"}
+
+
+@pytest.mark.asyncio
 async def test_anthropic_backend_rejects_thinking_effort() -> None:
     backend = AnthropicBackend(Mock())
 

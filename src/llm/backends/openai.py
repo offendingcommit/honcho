@@ -35,6 +35,37 @@ def _uses_max_completion_tokens(model: str) -> bool:
     return False
 
 
+def _uses_prompt_only_json_output(model: str) -> bool:
+    """Return true for OpenAI-compatible providers that reject response_format.
+
+    DeepSeek's OpenAI-compatible route can reject json_schema/json_object
+    response_format payloads. For those models, ask for JSON in the prompt
+    and run Honcho's local repair/validation path on the raw content.
+    """
+    return "deepseek" in model.lower()
+
+
+def _json_instruction(response_format: type[BaseModel] | None = None) -> str:
+    if response_format is None:
+        return "Return only valid JSON. Do not wrap it in Markdown."
+
+    schema = json.dumps(response_format.model_json_schema(), ensure_ascii=False)
+    return (
+        "Return only valid JSON matching this JSON Schema. Do not wrap it in "
+        f"Markdown or include prose outside the JSON.\nJSON Schema:\n{schema}"
+    )
+
+
+def _with_json_instruction(
+    messages: list[dict[str, Any]],
+    response_format: type[BaseModel] | None = None,
+) -> list[dict[str, Any]]:
+    return [
+        {"role": "system", "content": _json_instruction(response_format)},
+        *messages,
+    ]
+
+
 def extract_openai_reasoning_content(response: Any) -> str | None:
     try:
         message = response.choices[0].message
@@ -146,6 +177,21 @@ class OpenAIBackend:
         )
 
         if isinstance(response_format, type):
+            if _uses_prompt_only_json_output(model):
+                fallback_response = await self._create_prompt_only_structured_response(
+                    params=params,
+                    response_format=response_format,
+                )
+                content = self._parse_or_repair_structured_content(
+                    fallback_response,
+                    response_format,
+                    model,
+                )
+                return self._normalize_response(
+                    fallback_response,
+                    content_override=content,
+                )
+
             params["response_format"] = response_format
             try:
                 response = await self._client.chat.completions.parse(**params)
@@ -200,7 +246,10 @@ class OpenAIBackend:
             params["response_format"] = response_format
 
         if extra_params and extra_params.get("json_mode"):
-            params["response_format"] = {"type": "json_object"}
+            if _uses_prompt_only_json_output(model):
+                params["messages"] = _with_json_instruction(params["messages"])
+            else:
+                params["response_format"] = {"type": "json_object"}
 
         response = await self._client.chat.completions.create(**params)
         return self._normalize_response(response)
@@ -242,17 +291,26 @@ class OpenAIBackend:
         if isinstance(response_format, type):
             # parse() supports BaseModel types but streaming create() does not —
             # convert to a json_schema dict so the streaming path works.
-            params["response_format"] = {
-                "type": "json_schema",
-                "json_schema": {
-                    "name": response_format.__name__,
-                    "schema": response_format.model_json_schema(),
-                },
-            }
+            if _uses_prompt_only_json_output(model):
+                params["messages"] = _with_json_instruction(
+                    params["messages"],
+                    response_format,
+                )
+            else:
+                params["response_format"] = {
+                    "type": "json_schema",
+                    "json_schema": {
+                        "name": response_format.__name__,
+                        "schema": response_format.model_json_schema(),
+                    },
+                }
         elif response_format is not None:
             params["response_format"] = response_format
         elif extra_params and extra_params.get("json_mode"):
-            params["response_format"] = {"type": "json_object"}
+            if _uses_prompt_only_json_output(model):
+                params["messages"] = _with_json_instruction(params["messages"])
+            else:
+                params["response_format"] = {"type": "json_object"}
 
         response_stream = await self._client.chat.completions.create(**params)
         finish_reason: str | None = None
@@ -385,6 +443,20 @@ class OpenAIBackend:
                 "schema": response_format.model_json_schema(),
             },
         }
+        return await self._client.chat.completions.create(**structured_params)
+
+    async def _create_prompt_only_structured_response(
+        self,
+        *,
+        params: dict[str, Any],
+        response_format: type[BaseModel],
+    ) -> Any:
+        structured_params = dict(params)
+        structured_params["messages"] = _with_json_instruction(
+            params["messages"],
+            response_format,
+        )
+        structured_params.pop("response_format", None)
         return await self._client.chat.completions.create(**structured_params)
 
     @staticmethod

@@ -12,6 +12,16 @@ from src.llm.backend import CompletionResult, StreamChunk, ToolCallResult
 from src.llm.structured_output import repair_response_model_json
 
 
+def _is_deepseek_model(model: str) -> bool:
+    return "deepseek" in model.lower()
+
+
+def _deepseek_output_effort(thinking_effort: str) -> str:
+    if thinking_effort in {"xhigh", "max"}:
+        return "max"
+    return "high"
+
+
 class AnthropicBackend:
     """Provider backend wrapping the native Anthropic SDK."""
 
@@ -35,7 +45,7 @@ class AnthropicBackend:
         extra_params: dict[str, Any] | None = None,
     ) -> CompletionResult:
         del max_output_tokens
-        if thinking_effort is not None:
+        if thinking_effort is not None and not _is_deepseek_model(model):
             raise ValueError(
                 "Anthropic backend does not support thinking_effort; use thinking_budget_tokens instead"
             )
@@ -68,6 +78,10 @@ class AnthropicBackend:
             params["thinking"] = {
                 "type": "enabled",
                 "budget_tokens": thinking_budget_tokens,
+            }
+        if thinking_effort is not None and _is_deepseek_model(model):
+            params["output_config"] = {
+                "effort": _deepseek_output_effort(thinking_effort),
             }
         if extra_params:
             for key in ("top_p", "top_k"):
@@ -124,7 +138,7 @@ class AnthropicBackend:
     ) -> AsyncIterator[StreamChunk]:
         is_json_mode = self._json_mode(extra_params)
         del max_output_tokens
-        if thinking_effort is not None:
+        if thinking_effort is not None and not _is_deepseek_model(model):
             raise ValueError(
                 "Anthropic backend does not support thinking_effort; use thinking_budget_tokens instead"
             )
@@ -181,6 +195,10 @@ class AnthropicBackend:
             params["thinking"] = {
                 "type": "enabled",
                 "budget_tokens": thinking_budget_tokens,
+            }
+        if thinking_effort is not None and _is_deepseek_model(model):
+            params["output_config"] = {
+                "effort": _deepseek_output_effort(thinking_effort),
             }
 
         async with self._client.messages.stream(**params) as stream:

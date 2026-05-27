@@ -2,9 +2,14 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
 import pytest
+from pydantic import BaseModel
 
 from src.exceptions import ValidationException
 from src.llm.backends.openai import OpenAIBackend
+
+
+class StructuredResponse(BaseModel):
+    answer: str
 
 
 @pytest.mark.asyncio
@@ -228,6 +233,93 @@ async def test_openai_backend_converts_anthropic_style_tools() -> None:
         }
     ]
     assert call["tool_choice"] == "required"
+
+
+@pytest.mark.asyncio
+async def test_openai_backend_uses_prompt_only_structured_output_for_deepseek() -> None:
+    client = Mock()
+    client.chat.completions.parse = AsyncMock()
+    client.chat.completions.create = AsyncMock(
+        return_value=SimpleNamespace(
+            choices=[
+                SimpleNamespace(
+                    finish_reason="stop",
+                    message=SimpleNamespace(
+                        content='{"answer":"ok"}',
+                        tool_calls=[],
+                        reasoning_details=[],
+                    ),
+                )
+            ],
+            usage=SimpleNamespace(
+                prompt_tokens=10,
+                completion_tokens=5,
+                prompt_tokens_details=None,
+            ),
+        )
+    )
+
+    backend = OpenAIBackend(client)
+    result = await backend.complete(
+        model="deepseek/deepseek-v4-pro",
+        messages=[{"role": "user", "content": "Hello"}],
+        max_tokens=100,
+        response_format=StructuredResponse,
+        extra_params={"json_mode": True},
+    )
+
+    assert isinstance(result.content, StructuredResponse)
+    assert result.content.answer == "ok"
+    client.chat.completions.parse.assert_not_awaited()
+    await_args = client.chat.completions.create.await_args
+    if await_args is None:
+        raise AssertionError("Expected OpenAI create call")
+    call = await_args.kwargs
+    assert "response_format" not in call
+    assert call["messages"][0]["role"] == "system"
+    assert "JSON Schema" in call["messages"][0]["content"]
+
+
+@pytest.mark.asyncio
+async def test_openai_backend_uses_prompt_only_json_mode_for_deepseek() -> None:
+    client = Mock()
+    client.chat.completions.create = AsyncMock(
+        return_value=SimpleNamespace(
+            choices=[
+                SimpleNamespace(
+                    finish_reason="stop",
+                    message=SimpleNamespace(
+                        content='{"answer":"ok"}',
+                        tool_calls=[],
+                        reasoning_details=[],
+                    ),
+                )
+            ],
+            usage=SimpleNamespace(
+                prompt_tokens=10,
+                completion_tokens=5,
+                prompt_tokens_details=None,
+            ),
+        )
+    )
+
+    backend = OpenAIBackend(client)
+    await backend.complete(
+        model="deepseek-v4-flash",
+        messages=[{"role": "user", "content": "Hello"}],
+        max_tokens=100,
+        extra_params={"json_mode": True},
+    )
+
+    await_args = client.chat.completions.create.await_args
+    if await_args is None:
+        raise AssertionError("Expected OpenAI create call")
+    call = await_args.kwargs
+    assert "response_format" not in call
+    assert call["messages"][0] == {
+        "role": "system",
+        "content": "Return only valid JSON. Do not wrap it in Markdown.",
+    }
 
 
 @pytest.mark.parametrize(
