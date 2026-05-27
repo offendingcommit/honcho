@@ -1,3 +1,4 @@
+from typing import Any
 from unittest.mock import AsyncMock, Mock
 
 import pytest
@@ -400,14 +401,18 @@ async def test_session_add_messages_chunks_batches_over_limit(
         user = await honcho_client.aio.peer(id="user-add-msg-chunk-async")
         assert isinstance(user, Peer)
 
-        calls: list[dict] = []
+        async_calls: list[dict[str, Any]] = []
 
-        async def fake_post(route: str, body: dict | None = None, query=None):
+        async def async_fake_post(
+            route: str,
+            body: dict[str, Any] | None = None,
+            query: dict[str, Any] | None = None,
+        ) -> list[dict[str, Any]]:
             assert body is not None
-            calls.append({"route": route, "body": body, "query": query})
+            async_calls.append({"route": route, "body": body, "query": query})
             return [
                 {
-                    "id": f"msg-{len(calls)}-{idx}",
+                    "id": f"msg-{len(async_calls)}-{idx}",
                     "workspace_id": honcho_client.workspace_id,
                     "session_id": session.id,
                     "peer_id": user.id,
@@ -420,25 +425,32 @@ async def test_session_add_messages_chunks_batches_over_limit(
                 for idx, item in enumerate(body["messages"])
             ]
 
-        honcho_client._async_http_client.post = AsyncMock(side_effect=fake_post)  # pyright: ignore[reportAttributeAccessIssue]
+        honcho_client._async_http_client.post = AsyncMock(  # pyright: ignore[reportPrivateUsage]
+            side_effect=async_fake_post
+        )
 
         result = await session.aio.add_messages(
             [user.message(f"message {i}") for i in range(total_messages)]
         )
+        calls = async_calls
     else:
         session = honcho_client.session(id="test-session-add-msg-chunk-sync")
         assert isinstance(session, Session)
         user = honcho_client.peer(id="user-add-msg-chunk-sync")
         assert isinstance(user, Peer)
 
-        calls: list[dict] = []
+        sync_calls: list[dict[str, Any]] = []
 
-        def fake_post(route: str, body: dict | None = None, query=None):
+        def sync_fake_post(
+            route: str,
+            body: dict[str, Any] | None = None,
+            query: dict[str, Any] | None = None,
+        ) -> list[dict[str, Any]]:
             assert body is not None
-            calls.append({"route": route, "body": body, "query": query})
+            sync_calls.append({"route": route, "body": body, "query": query})
             return [
                 {
-                    "id": f"msg-{len(calls)}-{idx}",
+                    "id": f"msg-{len(sync_calls)}-{idx}",
                     "workspace_id": honcho_client.workspace_id,
                     "session_id": session.id,
                     "peer_id": user.id,
@@ -451,11 +463,14 @@ async def test_session_add_messages_chunks_batches_over_limit(
                 for idx, item in enumerate(body["messages"])
             ]
 
-        honcho_client._http.post = Mock(side_effect=fake_post)  # pyright: ignore[reportAttributeAccessIssue]
+        honcho_client._http.post = Mock(  # pyright: ignore[reportPrivateUsage]
+            side_effect=sync_fake_post
+        )
 
         result = session.add_messages(
             [user.message(f"message {i}") for i in range(total_messages)]
         )
+        calls = sync_calls
 
     assert len(calls) == 3
     assert [len(call["body"]["messages"]) for call in calls] == [100, 100, 17]

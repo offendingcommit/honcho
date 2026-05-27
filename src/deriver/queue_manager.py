@@ -393,9 +393,7 @@ class QueueManager:
                 try:
                     await self.cleanup_stale_work_units()
                 except Exception as cleanup_exc:
-                    logger.exception(
-                        "Stale work unit cleanup failed: %s", cleanup_exc
-                    )
+                    logger.exception("Stale work unit cleanup failed: %s", cleanup_exc)
 
                 # Check if we have capacity before querying for new work
                 if self.semaphore.locked():
@@ -477,7 +475,9 @@ class QueueManager:
                 )
                 .where(models.QueueItem.workspace_name.isnot(None))
                 .where(
-                    models.QueueItem.task_type.in_(("representation", "summary", "dream"))
+                    models.QueueItem.task_type.in_(
+                        ("representation", "summary", "dream")
+                    )
                 )
                 .group_by(models.QueueItem.workspace_name, models.QueueItem.task_type)
             )
@@ -609,7 +609,9 @@ class QueueManager:
                 .where(models.Session.is_active == True)  # noqa: E712
                 .where(~models.QueueItem.processed)
                 .where(
-                    models.QueueItem.task_type.in_(("representation", "summary", "dream"))
+                    models.QueueItem.task_type.in_(
+                        ("representation", "summary", "dream")
+                    )
                 )
                 .group_by(models.QueueItem.workspace_name, models.Session.name)
             )
@@ -1189,15 +1191,14 @@ class QueueManager:
                 )
                 now_utc = datetime.now(timezone.utc)
                 for item in items:
-                    if item.created_at is not None:
-                        prometheus_metrics.observe_deriver_queue_item_latency(
-                            workspace_name=work_unit.workspace_name,
-                            task_type=work_unit.task_type,
-                            outcome="processed",
-                            latency_seconds=max(
-                                0.0, (now_utc - item.created_at).total_seconds()
-                            ),
-                        )
+                    prometheus_metrics.observe_deriver_queue_item_latency(
+                        workspace_name=work_unit.workspace_name,
+                        task_type=work_unit.task_type,
+                        outcome="processed",
+                        latency_seconds=max(
+                            0.0, (now_utc - item.created_at).total_seconds()
+                        ),
+                    )
 
     async def mark_queue_item_as_errored(
         self, item: QueueItem, work_unit_key: str, error: str
@@ -1229,18 +1230,15 @@ class QueueManager:
                     workspace_name=work_unit.workspace_name,
                     task_type=work_unit.task_type,
                 )
-                if item.created_at is not None:
-                    prometheus_metrics.observe_deriver_queue_item_latency(
-                        workspace_name=work_unit.workspace_name,
-                        task_type=work_unit.task_type,
-                        outcome="errored",
-                        latency_seconds=max(
-                            0.0,
-                            (
-                                datetime.now(timezone.utc) - item.created_at
-                            ).total_seconds(),
-                        ),
-                    )
+                prometheus_metrics.observe_deriver_queue_item_latency(
+                    workspace_name=work_unit.workspace_name,
+                    task_type=work_unit.task_type,
+                    outcome="errored",
+                    latency_seconds=max(
+                        0.0,
+                        (datetime.now(timezone.utc) - item.created_at).total_seconds(),
+                    ),
+                )
 
     async def _cleanup_work_unit(
         self,

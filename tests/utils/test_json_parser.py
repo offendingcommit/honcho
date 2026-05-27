@@ -2,8 +2,6 @@
 
 import json
 
-import pytest
-
 from src.utils.json_parser import validate_and_repair_json
 
 
