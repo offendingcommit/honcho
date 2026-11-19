@@ -1,6 +1,6 @@
 # Honcho MCP Server
 
-A Cloudflare Worker that implements the [Model Context Protocol (MCP)](https://modelcontextprotocol.io/) for [Honcho](https://honcho.dev), providing AI memory and personalization tools to LLM clients like Claude Desktop.
+An MCP server for [Honcho](https://honcho.dev), with entrypoints for both Cloudflare Workers and a local Bun HTTP server.
 
 ## Quickstart: Use the Hosted Server
 
@@ -52,6 +52,7 @@ A Cloudflare Worker that implements the [Model Context Protocol (MCP)](https://m
 ```
 src/
   index.ts              # Worker entry point — parse config, delegate to MCP handler
+  serve.ts              # Bun HTTP entry point — stateful MCP server for local use
   server.ts             # createServer() — registers all tools on an McpServer
   config.ts             # HonchoConfig, parseConfig(), createClient()
   types.ts              # ToolContext, result helpers
@@ -71,11 +72,42 @@ Built on:
 
 ## Self-Hosted Honcho
 
-If you run Honcho yourself (for privacy, latency, or offline use), deploy the
-MCP Worker alongside your instance and set `HONCHO_API_URL` in its
-environment.
+If you run Honcho yourself (for privacy, latency, or offline use), point the
+MCP server at your Honcho API with a base URL plus request headers.
 
-**Local dev (`bun run dev`):** create `mcp/.dev.vars`:
+**Codex / stdio (`bun src/stdio.ts`):**
+
+This is the closest match to tools like `qmd`: Codex spawns the process directly
+over stdio, so there is no `mcp-remote` bridge and no long-running local HTTP
+server.
+
+```toml
+[mcp_servers.honcho]
+command = "bun"
+args = [
+  "/Volumes/dev/honcho/mcp/src/stdio.ts",
+  "http://127.0.0.1:28000",
+  "--header",
+  "Authorization:Bearer dummy",
+  "--header",
+  "X-Honcho-User-Name:jonathan",
+  "--header",
+  "X-Honcho-Assistant-Name:codex",
+  "--header",
+  "X-Honcho-Workspace-ID:airstrip"
+]
+```
+
+**Local Bun server (`bun run serve`):**
+
+```bash
+HONCHO_API_URL=http://127.0.0.1:28000 bun run serve
+```
+
+The Bun server listens on `127.0.0.1:8787` by default. Override with
+`MCP_HOST` and `MCP_PORT` if needed.
+
+**Local Worker dev (`bun run dev`):** create `mcp/.dev.vars`:
 
 ```
 HONCHO_API_URL=http://127.0.0.1:28000
@@ -105,6 +137,21 @@ bun install
 bun dev
 ```
 
+### Local Bun server
+
+```bash
+HONCHO_API_URL=http://127.0.0.1:28000 bun run serve
+```
+
+### Local stdio server
+
+```bash
+bun run stdio -- \
+  http://127.0.0.1:28000 \
+  --header "Authorization:Bearer dummy" \
+  --header "X-Honcho-User-Name:jonathan"
+```
+
 ### Type-check
 
 ```bash
@@ -114,7 +161,7 @@ bun run tsc --noEmit
 ### Test locally
 
 ```bash
-bunx mcp-remote http://localhost:8787 \
+bunx mcp-remote http://127.0.0.1:8787 \
   --header "Authorization:Bearer <key>" \
   --header "X-Honcho-User-Name:test"
 ```
